@@ -90,7 +90,17 @@ export function DatagenPanel({
   const pct = d.target > 0 ? Math.min(100, (d.positions / d.target) * 100) : 0;
   const n = (x: number) => x.toLocaleString("en-US");
 
-  if (d.running || d.positions > 0) {
+  // A finished run keeps its summary on screen -- that is the result, and
+  // throwing it away the instant the run ends is worse than showing it. But it
+  // is a summary, not a mode: asking for a new run has to bring the form back.
+  // Gating purely on `positions > 0` stranded the panel in the progress view
+  // for the rest of the session, so a second run meant restarting the binary.
+  const [configuring, setConfiguring] = useState(false);
+  useEffect(() => {
+    if (d.running) setConfiguring(false);
+  }, [d.running]);
+
+  if ((d.running || d.positions > 0) && !configuring) {
     const total = Math.max(1, d.wins + d.draws + d.losses);
     return (
       <div className="panel">
@@ -142,21 +152,44 @@ export function DatagenPanel({
           </span>
         </div>
         <div className="controls" style={{ marginTop: 8 }}>
-          <button
-            className={`btn${s.paused ? " on" : ""}`}
-            onClick={() => send({ cmd: "pause", value: !s.paused })}
-          >
-            {s.paused ? "resume" : "pause"}
-          </button>
-          <button
-            className="btn"
-            onClick={() => send({ cmd: "datagen", action: "stop" })}
-          >
-            stop
-          </button>
+          {d.running ? (
+            <>
+              <button
+                className={`btn${s.paused ? " on" : ""}`}
+                onClick={() => send({ cmd: "pause", value: !s.paused })}
+              >
+                {s.paused ? "resume" : "pause"}
+              </button>
+              <button
+                className="btn"
+                onClick={() => send({ cmd: "datagen", action: "stop" })}
+              >
+                stop
+              </button>
+            </>
+          ) : (
+            // Pause and stop are meaningless once the run has ended; offering
+            // them made the panel look live when nothing was happening.
+            <button
+              className="btn"
+              onClick={() => {
+                // Carry the finished run's path back into the form. Dropping
+                // back to the default meant the resume offer for the dataset
+                // you were just building never appeared.
+                if (d.out) setOut(d.out);
+                setConfiguring(true);
+              }}
+            >
+              new run
+            </button>
+          )}
         </div>
         <div className="axis" style={{ marginTop: 6 }}>
-          <span>settings locked while generating</span>
+          <span>
+            {d.running
+              ? "settings locked while generating"
+              : `finished · ${n(d.positions)} positions in ${n(d.games)} games`}
+          </span>
         </div>
       </div>
     );
