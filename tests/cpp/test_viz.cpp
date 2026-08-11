@@ -325,9 +325,42 @@ bool datagen_shard_test() {
     session.stop();
     return true;
   };
-  if (!drive(false, 400) || !drive(true, 700)) {
+  const auto fail_start = [&] {
     std::printf("FAIL: could not start datagen in %s\n", dir.string().c_str());
     return false;
+  };
+  if (!drive(false, 400))
+    return fail_start();
+
+  // Resume asking for DIFFERENT row-shaping settings. They have to be ignored:
+  // one dataset must be produced one way, and resume is the only place those
+  // settings could otherwise change without anyone noticing. Shard size is the
+  // one that shows up directly on disk -- if the caller's 999 won here, the
+  // shards after the boundary would be a different length.
+  dg.shardPositions = 999;
+  dg.nodes = 900;
+  dg.depth = 6;
+  dg.raw = false;
+  if (!drive(true, 700))
+    return fail_start();
+  dg.shardPositions = 120; // what the run was actually built with
+
+  {
+    const Viz::DatagenState st = Viz::Session::probe_datagen(dir.string());
+    if (!st.hasConfig) {
+      std::printf("FAIL: resume left no recorded config in %s\n",
+                  dir.string().c_str());
+      return false;
+    }
+    if (st.config.shardPositions != 120 || st.config.nodes != 250 ||
+        st.config.depth != 0 || !st.config.raw) {
+      std::printf("FAIL: resume overwrote the dataset's own settings "
+                  "(shard %lld, nodes %d, depth %d, raw %d)\n",
+                  static_cast<long long>(st.config.shardPositions),
+                  st.config.nodes, st.config.depth,
+                  static_cast<int>(st.config.raw));
+      return false;
+    }
   }
 
   std::vector<fs::path> shards;

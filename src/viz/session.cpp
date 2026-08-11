@@ -6,8 +6,10 @@
 
 #include "../uci/uci_util.h"
 #include "wire.h"
+
 #include <cstdlib>
 #include <iterator>
+#include <json.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -286,28 +288,67 @@ DatagenState Session::probe_datagen(const std::string &out) {
   std::ifstream in(state_path_for(out));
   if (!in)
     return st;
-  // Deliberately a tiny hand-parse: the file is ours and has four integers.
-  std::string body((std::istreambuf_iterator<char>(in)),
-                   std::istreambuf_iterator<char>());
-  const auto grab = [&](const char *key) -> int64_t {
-    const size_t k = body.find(key);
-    if (k == std::string::npos)
-      return 0;
-    const size_t c = body.find(':', k);
-    return c == std::string::npos
-               ? 0
-               : std::strtoll(body.c_str() + c + 1, nullptr, 10);
+  const nlohmann::json j =
+      nlohmann::json::parse(in, nullptr, /*allow_exceptions=*/false);
+  if (j.is_discarded() || !j.is_object())
+    return st;
+  const auto num = [&](const nlohmann::json &o, const char *k, auto def) {
+    return o.contains(k) && o[k].is_number() ? o[k].get<decltype(def)>() : def;
   };
-  st.resumablePositions = grab("\"positions\"");
-  st.games = grab("\"games\"");
-  st.shard = static_cast<int>(grab("\"shard\""));
+  st.resumablePositions = num(j, "positions", int64_t{0});
+  st.games = num(j, "games", int64_t{0});
+  st.shard = num(j, "shard", int{0});
   st.resumable = st.resumablePositions > 0 || st.games > 0;
+
+  // A file written before the config was recorded still resumes; it just
+  // cannot pin the settings, so hasConfig stays false and the caller's values
+  // are used as before.
+  if (j.contains("config") && j["config"].is_object()) {
+    const nlohmann::json &c = j["config"];
+    DatagenConfig d;
+    d.out = out;
+    d.targetPositions = num(c, "targetPositions", d.targetPositions);
+    d.targetGames = num(c, "targetGames", d.targetGames);
+    d.nodes = num(c, "nodes", d.nodes);
+    d.depth = num(c, "depth", d.depth);
+    d.skipPlies = num(c, "skipPlies", d.skipPlies);
+    d.maxPlies = num(c, "maxPlies", d.maxPlies);
+    d.openingPlies = num(c, "openingPlies", d.openingPlies);
+    d.balance = num(c, "balance", d.balance);
+    d.varietyCp = num(c, "varietyCp", d.varietyCp);
+    d.varietyPlies = num(c, "varietyPlies", d.varietyPlies);
+    d.shardPositions = num(c, "shardPositions", d.shardPositions);
+    d.lam = num(c, "lam", d.lam);
+    d.seed = num(c, "seed", d.seed);
+    if (c.contains("raw") && c["raw"].is_boolean())
+      d.raw = c["raw"].get<bool>();
+    st.config = d;
+    st.hasConfig = true;
+  }
   return st;
 }
 
-bool Session::start_datagen(const DatagenConfig &cfg, bool resume) {
-  if (cfg.out.empty())
+bool Session::start_datagen(const DatagenConfig &wanted, bool resume) {
+  if (wanted.out.empty())
     return false;
+
+  // Resuming continues ONE dataset, so the rows added now have to be produced
+  // the same way as the rows already on disk. Everything that shapes a row is
+  // therefore taken from what the run recorded, not from what the caller sent
+  // -- otherwise resume is the one place those settings can change unnoticed,
+  // and the result is a file that looks like a dataset but is two.
+  //
+  // The targets are the exception: extending a run to a larger goal is the
+  // whole reason to resume, so those come from the caller.
+  DatagenConfig cfg = wanted;
+  const DatagenState prev = resume ? probe_datagen(wanted.out) : DatagenState{};
+  if (resume && prev.hasConfig) {
+    cfg = prev.config;
+    cfg.out = wanted.out;
+    cfg.targetPositions = wanted.targetPositions;
+    cfg.targetGames = wanted.targetGames;
+  }
+
   uint64_t seed = 0;
   {
     std::lock_guard<std::mutex> lk(dgMu_);
@@ -322,7 +363,6 @@ bool Session::start_datagen(const DatagenConfig &cfg, bool resume) {
     dgState_.target = cfg.targetPositions;
     dgState_.targetGames = cfg.targetGames;
     if (resume) {
-      const DatagenState prev = probe_datagen(cfg.out);
       dgState_.positions = prev.resumablePositions;
       dgState_.games = prev.games;
     }
@@ -363,15 +403,33 @@ void Session::stop_datagen() {
 
 void Session::datagen_save_state() {
   // Written after every game so a crash loses at most one game's worth.
+  //
+  // The whole config goes in, not just the counters: a resume has to rebuild
+  // the run exactly, and anything omitted here is a setting that could silently
+  // change halfway through a dataset.
+  nlohmann::json j;
+  j["positions"] = dgState_.positions;
+  j["games"] = dgState_.games;
+  j["shard"] = dgOut_.shard();
+  j["config"] = {{"out", dgCfg_.out},
+                 {"targetPositions", dgCfg_.targetPositions},
+                 {"targetGames", dgCfg_.targetGames},
+                 {"nodes", dgCfg_.nodes},
+                 {"depth", dgCfg_.depth},
+                 {"skipPlies", dgCfg_.skipPlies},
+                 {"maxPlies", dgCfg_.maxPlies},
+                 {"openingPlies", dgCfg_.openingPlies},
+                 {"balance", dgCfg_.balance},
+                 {"varietyCp", dgCfg_.varietyCp},
+                 {"varietyPlies", dgCfg_.varietyPlies},
+                 {"shardPositions", dgCfg_.shardPositions},
+                 {"lam", dgCfg_.lam},
+                 {"raw", dgCfg_.raw},
+                 {"seed", dgCfg_.seed}};
   std::ofstream st(state_path_for(dgCfg_.out), std::ios::trunc);
   if (!st)
     return;
-  st << "{\n  \"positions\": " << dgState_.positions
-     << ",\n  \"games\": " << dgState_.games
-     << ",\n  \"target\": " << dgState_.target
-     << ",\n  \"nodes\": " << dgCfg_.nodes
-     << ",\n  \"shard\": " << dgOut_.shard()
-     << ",\n  \"shardPositions\": " << dgCfg_.shardPositions << "\n}\n";
+  st << j.dump(2) << '\n';
 }
 
 void Session::datagen_write(const std::vector<std::pair<std::string, int>> &rec,

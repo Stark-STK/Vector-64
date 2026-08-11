@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
-import type { ControlCommand, EngineState } from "../engine/types";
+import type {
+  ControlCommand,
+  DatagenProbe,
+  EngineState,
+} from "../engine/types";
 
 /**
  * Data generation, driven by the engine's OWN native generator -- the same
@@ -17,7 +21,7 @@ export function DatagenPanel({
 }: {
   s: EngineState;
   send: (c: ControlCommand) => void;
-  probe: (out: string) => Promise<{ resumable: boolean; positions: number; games: number }>;
+  probe: (out: string) => Promise<DatagenProbe>;
 }) {
   const d = s.datagen;
   // Every field starts from what the ENGINE ships, so the tool and the CLI
@@ -39,9 +43,7 @@ export function DatagenPanel({
   );
   const [seed, setSeed] = useState(String(def.seed));
   const [more, setMore] = useState(false);
-  const [found, setFound] = useState<{ positions: number; games: number } | null>(
-    null,
-  );
+  const [found, setFound] = useState<DatagenProbe | null>(null);
 
   // Look for a recoverable run whenever the path changes, so a crashed session
   // is offered back instead of being silently overwritten.
@@ -381,8 +383,23 @@ export function DatagenPanel({
       {found && (
         <div className="resume-note">
           A previous run left <b>{n(found.positions)}</b> positions across{" "}
-          <b>{n(found.games)}</b> games in this file. Resuming appends to it;
-          starting fresh overwrites it.
+          <b>{n(found.games)}</b> games here. Resuming appends to it; starting
+          fresh overwrites it.
+          {found.config && (
+            <>
+              {" "}
+              Resume keeps the settings that dataset was built with, so the
+              fields above apply to <b>start fresh</b> only:{" "}
+              <b>
+                {found.config.nodes} nodes · depth {found.config.depth} ·{" "}
+                {found.config.emit}
+                {found.config.shardPositions > 0
+                  ? ` · shards of ${n(found.config.shardPositions)}`
+                  : " · single file"}
+              </b>
+              .
+            </>
+          )}
         </div>
       )}
 

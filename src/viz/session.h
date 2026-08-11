@@ -86,6 +86,12 @@ struct DatagenState {
   // Which shard rows are landing in, and where, for the progress display.
   int shard = 0;
   std::string shardPath;
+  // The settings the run on disk was built with. A resume reuses these instead
+  // of whatever the caller happens to send: a dataset assembled from shifting
+  // node counts or labelling rules is not one dataset, and resume is precisely
+  // where they could otherwise change unnoticed.
+  bool hasConfig = false;
+  DatagenConfig config;
 };
 
 // Random-opening length when one is requested but the config asks for none
@@ -246,7 +252,7 @@ public:
   // Data generation. start_datagen switches to Datagen mode and begins writing;
   // `resume` continues a previous run's file and counters instead of
   // truncating.
-  bool start_datagen(const DatagenConfig &cfg, bool resume);
+  bool start_datagen(const DatagenConfig &wanted, bool resume);
   void stop_datagen();
   // Inspect an output path for a recoverable previous run.
   static DatagenState probe_datagen(const std::string &out);

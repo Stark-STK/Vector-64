@@ -312,11 +312,28 @@ std::string handle_control(Session &session, const std::string &body,
       session.stop_datagen();
     } else if (action == "probe") {
       const DatagenState st = Session::probe_datagen(out);
-      return json{{"ok", true},
-                  {"resumable", st.resumable},
-                  {"positions", st.resumablePositions},
-                  {"games", st.games}}
-          .dump();
+      json r{{"ok", true},
+             {"resumable", st.resumable},
+             {"positions", st.resumablePositions},
+             {"games", st.games}};
+      // A resume reuses the settings the run was built with, so say which
+      // those are rather than letting the form imply its own values apply.
+      if (st.hasConfig) {
+        const DatagenConfig &c = st.config;
+        r["config"] = {{"nodes", c.nodes},
+                       {"depth", c.depth},
+                       {"skipPlies", c.skipPlies},
+                       {"maxPlies", c.maxPlies},
+                       {"openingPlies", c.openingPlies},
+                       {"balance", c.balance},
+                       {"varietyCp", c.varietyCp},
+                       {"varietyPlies", c.varietyPlies},
+                       {"shardPositions", c.shardPositions},
+                       {"lam", c.lam},
+                       {"emit", c.raw ? "raw" : "blend"},
+                       {"seed", c.seed}};
+      }
+      return r.dump();
     } else {
       // Starting includes resuming a crashed run, and neither makes sense on
       // top of a live one.

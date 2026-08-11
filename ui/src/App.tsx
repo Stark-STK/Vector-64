@@ -2,7 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { connect } from "./engine/connect";
 import type { BootProgress } from "./engine/connect";
 import type { ConnectionState, EngineSource } from "./engine/source";
-import type { ControlCommand, EngineState } from "./engine/types";
+import type {
+  ControlCommand,
+  DatagenProbe,
+  EngineState,
+} from "./engine/types";
 import { Board } from "./components/Board";
 import { Controls } from "./components/Controls";
 import { NeuronField } from "./components/NeuronField";
@@ -134,11 +138,7 @@ export default function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cmd: "datagen", action: "probe", out }),
     });
-    return (await res.json()) as {
-      resumable: boolean;
-      positions: number;
-      games: number;
-    };
+    return (await res.json()) as DatagenProbe;
   };
 
   if (boot) return <BootScreen p={boot} />;

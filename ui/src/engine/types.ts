@@ -155,6 +155,31 @@ export interface RecordState {
   frames: number;
 }
 
+/**
+ * What a probe found on disk. `config` is the settings the existing run was
+ * built with; a resume reuses them, so the form's own values do not apply.
+ * Absent for a dataset written before the settings were recorded.
+ */
+export interface DatagenProbe {
+  resumable: boolean;
+  positions: number;
+  games: number;
+  config?: {
+    nodes: number;
+    depth: number;
+    skipPlies: number;
+    maxPlies: number;
+    openingPlies: number;
+    balance: number;
+    varietyCp: number;
+    varietyPlies: number;
+    shardPositions: number;
+    lam: number;
+    emit: "raw" | "blend";
+    seed: number;
+  };
+}
+
 /** The engine's own shipped defaults; the UI never invents its own. */
 export interface DatagenDefaults {
   out: string;
