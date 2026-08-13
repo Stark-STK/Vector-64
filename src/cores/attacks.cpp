@@ -193,16 +193,29 @@ void init_magics(bool is_bishop, Bitboard *&attack_table_ptr) {
   }
 }
 
+// Two squares share a rank, a file, or a diagonal. Judged on raw file/rank
+// deltas, before any normalization to unit steps.
+bool aligned(int f1, int r1, int f2, int r2) {
+  const int df = f2 - f1;
+  const int dr = r2 - r1;
+  if (df == 0 && dr == 0)
+    return false;
+  if (df == 0 || dr == 0)
+    return true;
+  return abs(df) == abs(dr);
+}
+
 Bitboard compute_between(Square s1, Square s2) {
   Bitboard bb = 0;
   int f1 = file_of(s1), r1 = rank_of(s1);
   int f2 = file_of(s2), r2 = rank_of(s2);
+  // Alignment must be judged on the raw deltas: the normalized step below is
+  // always +/-1, so testing abs() on it would accept every square pair and
+  // walk a diagonal off the edge of the board.
+  if (!aligned(f1, r1, f2, r2))
+    return 0;
   int df = (f2 > f1) ? 1 : ((f2 < f1) ? -1 : 0);
   int dr = (r2 > r1) ? 1 : ((r2 < r1) ? -1 : 0);
-  if (df == 0 && dr == 0)
-    return 0;
-  if (df != 0 && dr != 0 && abs(df) != abs(dr))
-    return 0;
   Square curr = (Square)(s1 + (dr * 8) + df);
   while (curr != s2 && curr >= 0 && curr < 64) {
     bb |= square_bb(curr);
@@ -214,12 +227,10 @@ Bitboard compute_between(Square s1, Square s2) {
 Bitboard compute_line(Square s1, Square s2) {
   int f1 = file_of(s1), r1 = rank_of(s1);
   int f2 = file_of(s2), r2 = rank_of(s2);
+  if (!aligned(f1, r1, f2, r2))
+    return 0;
   int df = (f2 > f1) ? 1 : ((f2 < f1) ? -1 : 0);
   int dr = (r2 > r1) ? 1 : ((r2 < r1) ? -1 : 0);
-  if (df == 0 && dr == 0)
-    return 0;
-  if (df != 0 && dr != 0 && abs(df) != abs(dr))
-    return 0;
   Bitboard bb = 0;
   for (int i = -7; i <= 7; ++i) {
     if (i == 0)

@@ -171,6 +171,28 @@ void generate_castling_pseudos(const Position &pos, MoveList &moves) {
   }
 }
 
+#if defined(ENGINE_VARIANTS)
+// Drops go to any empty square; pawns may not be dropped on the back ranks.
+// Unlike shogi there is no restriction on doubled pawns and drop-mate is
+// legal, so this is the whole rule. Legality against check is handled by
+// is_legal(), which has a cheap exact test for drops.
+void generate_drop_pseudos(const Position &pos, MoveList &moves) {
+  const Color us = pos.side_to_move();
+  const Bitboard empty = ~pos.occupancy();
+  const Bitboard pawnOk = empty & ~(RANK_1_BB | RANK_8_BB);
+
+  for (int pt = PAWN; pt <= QUEEN; ++pt) {
+    if (pos.in_hand(us, static_cast<PieceType>(pt)) == 0)
+      continue;
+    Bitboard targets = (pt == PAWN) ? pawnOk : empty;
+    while (targets) {
+      moves.push_back(
+          Move::make_drop(static_cast<PieceType>(pt), pop_lsb(targets)));
+    }
+  }
+}
+#endif
+
 template <GenType Gt>
 void generate_pseudos(const Position &pos, MoveList &moves) {
   moves.clear();
@@ -191,6 +213,15 @@ void generate_pseudos(const Position &pos, MoveList &moves) {
   }
   if constexpr (Gt != GEN_CAPTURES) {
     generate_castling_pseudos(pos, moves);
+#if defined(ENGINE_VARIANTS)
+    // Drops are quiet moves -- they can never capture. Quiescence therefore
+    // does not see them today, which is a known strength gap in drop
+    // variants (checking drops are the main tactical motif) and is tracked
+    // separately from correctness.
+    if (pos.has_drops() && pos.has_any_in_hand(pos.side_to_move())) {
+      generate_drop_pseudos(pos, moves);
+    }
+#endif
   }
 }
 
@@ -358,11 +389,36 @@ bool is_pseudo_legal(const Position &pos, Move m) {
   if (!m.is_ok())
     return false;
 
-  // The generators only emit canonical flag encodings; 0b0101–0b0111
-  // are unused and must not compare equal to any generated move.
+  // The generators only emit canonical flag encodings; the unused codes
+  // must not compare equal to any generated move. DROP is canonical only
+  // in a variant build.
   const int flags = m.flags();
+#if defined(ENGINE_VARIANTS)
+  if (flags > Move::DROP && flags < Move::PROMOTION_N)
+    return false;
+
+  if (flags == Move::DROP) {
+    // Validate hard: an unchecked drop decrements a hand counter that may be
+    // zero, which corrupts position state permanently rather than merely
+    // producing a bad move.
+    if (!pos.has_drops())
+      return false;
+    const PieceType dropped = m.dropped_piece();
+    if (dropped < PAWN || dropped > QUEEN)
+      return false;
+    if (pos.in_hand(pos.side_to_move(), dropped) == 0)
+      return false;
+    const Square to = m.to_sq();
+    if (pos.occupancy() & square_bb(to))
+      return false;
+    if (dropped == PAWN && (square_bb(to) & (RANK_1_BB | RANK_8_BB)))
+      return false;
+    return true;
+  }
+#else
   if (flags > Move::CAPTURE && flags < Move::PROMOTION_N)
     return false;
+#endif
 
   const Square from = m.from_sq();
   const Square to = m.to_sq();

@@ -127,6 +127,35 @@ set_target_properties(ChessEngine PROPERTIES
 )
 
 # ---------------------------------------------------------------------------
+# Variant binary: ChessEngine-variants, supporting crazyhouse and bughouse via
+# the UCI_Variant option. Drops, reserves and promoted-piece tracking are
+# compile-time gated behind ENGINE_VARIANTS and built into a *separate* core
+# library, so the tournament binaries above contain none of it: no extra
+# Position state, no branches in move_piece/remove_piece, and MoveList stays
+# at 256 entries. The standard bench signature and NPS are unaffected by
+# construction, not by measurement.
+# ---------------------------------------------------------------------------
+option(ENGINE_VARIANTS "Build ChessEngine-variants (crazyhouse + bughouse)" ON)
+if(ENGINE_VARIANTS)
+        add_library(chess_core_variants STATIC ${CORE_SOURCES} ${CORE_HEADERS})
+        set_source_files_properties(src/syzygy/tbprobe.c PROPERTIES LANGUAGE CXX)
+        target_compile_definitions(chess_core_variants PUBLIC ENGINE_VARIANTS)
+        target_include_directories(chess_core_variants PUBLIC src)
+        target_include_directories(chess_core_variants PRIVATE src/syzygy)
+
+        add_executable(ChessEngine-variants
+                app/main.cpp
+                tests/cpp/perfts.cpp
+                tests/cpp/perfts.h
+        )
+        target_include_directories(ChessEngine-variants PRIVATE tests/cpp)
+        target_link_libraries(ChessEngine-variants chess_core_variants)
+        set_target_properties(ChessEngine-variants PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+        message(STATUS "Variant binary: ChessEngine-variants (crazyhouse, bughouse)")
+endif()
+
+# ---------------------------------------------------------------------------
 # NNUE binary: ChessEngine-nnue, with the default net baked into the executable
 # (Stockfish-style, via GNU-as .incbin). Built only when the net exists and the
 # toolchain is GNU/Clang (the embed uses GNU-as directives; MSVC/macOS embedding
@@ -296,6 +325,18 @@ set_target_properties(test_zobrist PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
+if(ENGINE_VARIANTS)
+    add_executable(test_variants
+            tests/cpp/test_variants.cpp
+            tests/cpp/perfts.cpp
+    )
+    target_include_directories(test_variants PRIVATE tests/cpp)
+    target_link_libraries(test_variants chess_core_variants)
+    set_target_properties(test_variants PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+endif()
+
 add_executable(test_viz tests/cpp/test_viz.cpp)
 target_link_libraries(test_viz chess_viz)
 set_target_properties(test_viz PROPERTIES
@@ -310,7 +351,7 @@ message(STATUS "C++ Standard: ${CMAKE_CXX_STANDARD}")
 # ---------------------------------------------------------------------------
 enable_testing()
 
-# Perft — exact node counts for the six reference positions, each depth its own
+# Perft -- exact node counts for the six reference positions, each depth its own
 # test, so a movegen regression points at the exact position and depth.
 function(add_perft_test name fen depth expected)
     add_test(NAME "perft.${name}"
@@ -357,6 +398,12 @@ add_perft_test(position6_d4 "${FEN_POS6}" 4 3894594)
 # State / evaluation invariants.
 add_test(NAME "consistency.nnue_simd_bitexact" COMMAND test_zobrist nnue)
 add_test(NAME "consistency.make_unmake_and_movegen" COMMAND test_zobrist games)
+
+# Drop variants: reserves, promoted-piece tracking and drop legality, plus the
+# perft anchor that crazyhouse must equal standard chess until drops exist.
+if(ENGINE_VARIANTS)
+    add_test(NAME "variants.drops_state_and_perft" COMMAND test_variants)
+endif()
 
 # Visualizer telemetry reports the engine's real arithmetic: the captured eval
 # equals the ordinary eval path, and each layer's attribution sums back to that

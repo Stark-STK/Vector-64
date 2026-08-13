@@ -14,6 +14,11 @@ public:
     CASTLING = 0b0010,
     EN_PASSANT = 0b0011,
     CAPTURE = 0b0100,
+    // Bughouse: a piece from the hand placed on an empty square. There is no
+    // origin square, so the from_sq field carries the dropped PieceType
+    // instead. Keeps Move at 16 bits, so the TT, PV and killer tables are
+    // unaffected. 0b0110 and 0b0111 remain unused.
+    DROP = 0b0101,
     PROMOTION_N = 0b1000,
     PROMOTION_B = 0b1001,
     PROMOTION_R = 0b1010,
@@ -35,6 +40,11 @@ public:
     return Move(from, to, QUIET);
   }
 
+  // Bughouse drop: `pt` rides in the from_sq field (see DROP).
+  static Move make_drop(PieceType pt, Square to) {
+    return Move(static_cast<Square>(pt), to, DROP);
+  }
+
   static Move none() { return Move(0); }
 
   constexpr Square from_sq() const { return static_cast<Square>(data & 0x3F); }
@@ -45,11 +55,30 @@ public:
 
   constexpr int flags() const { return (data >> 12) & 0xF; }
 
+#if defined(ENGINE_VARIANTS)
+  // Exact per-flag capture mask rather than a bit test: DROP (0b0101) shares
+  // bit 2 with CAPTURE, so `data & 0x4000` would misread every drop as a
+  // capture. Bits set for EN_PASSANT, CAPTURE and the four PROMOTION_CAP_*.
+  // The standard build keeps the original bit test byte for byte.
+  static constexpr uint16_t CAPTURE_FLAGS = 0xF018;
+
+  bool is_capture() const { return (CAPTURE_FLAGS >> flags()) & 1; }
+
+  bool is_drop() const { return flags() == DROP; }
+#else
   bool is_capture() const {
     return (data & 0x4000) != 0 || flags() == EN_PASSANT;
   }
 
+  static constexpr bool is_drop() { return false; }
+#endif
+
   bool is_promotion() const { return (data & 0x8000) != 0; }
+
+  // Valid only when is_drop(); the from_sq field holds the piece type.
+  PieceType dropped_piece() const {
+    return static_cast<PieceType>(data & 0x3F);
+  }
 
   bool is_en_passant() const { return flags() == EN_PASSANT; }
 
@@ -86,7 +115,15 @@ private:
 };
 
 struct MoveList {
+#if defined(ENGINE_VARIANTS)
+  // 256 covers standard chess (max 218 legal moves), but a drop-variant
+  // position adds up to five piece types x every empty square on top of the
+  // board moves, which can exceed it. Only the variant build pays the larger
+  // stack frame; the standard build keeps 256.
+  static constexpr int MAX_MOVES = 512;
+#else
   static constexpr int MAX_MOVES = 256;
+#endif
 
   Move moves[MAX_MOVES];
   int count;

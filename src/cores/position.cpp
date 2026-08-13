@@ -109,7 +109,33 @@ Position::Position() {
   materialWb = 0;
   psqtWb = 0;
   gamePly = 0;
+
+#if defined(ENGINE_VARIANTS)
+  variant = VARIANT_STANDARD;
+  drops = false;
+  std::memset(hand, 0, sizeof(hand));
+  std::memset(handCount, 0, sizeof(handCount));
+  promoted = 0;
+#endif
 }
+
+#if defined(ENGINE_VARIANTS)
+void Position::add_to_hand(Color c, PieceType pt) {
+  uint8_t &n = hand[c][pt];
+  if (n < MAX_IN_HAND)
+    zobristHash ^= Zobrist::hand[c][pt][n] ^ Zobrist::hand[c][pt][n + 1];
+  ++n;
+  ++handCount[c];
+}
+
+void Position::remove_from_hand(Color c, PieceType pt) {
+  uint8_t &n = hand[c][pt];
+  if (n <= MAX_IN_HAND)
+    zobristHash ^= Zobrist::hand[c][pt][n] ^ Zobrist::hand[c][pt][n - 1];
+  --n;
+  --handCount[c];
+}
+#endif
 
 void Position::put_piece(PieceType pt, Color c, Square s) {
   if (pt == NO_PIECE_TYPE)
@@ -137,6 +163,13 @@ void Position::remove_piece(Color c, Square s) {
   materialWb -= sign * PieceValue[pt];
   psqtWb -= sign * PsqTable[c][pt][s];
   zobristHash ^= Zobrist::psq[c][pt][s];
+
+#if defined(ENGINE_VARIANTS)
+  if (drops && (promoted & bb)) {
+    promoted ^= bb;
+    zobristHash ^= Zobrist::promotedSq[s];
+  }
+#endif
 }
 
 void Position::move_piece(Color c, Square from, Square to) {
@@ -158,6 +191,15 @@ void Position::move_piece(Color c, Square from, Square to) {
 
   zobristHash ^= Zobrist::psq[c][pt][from];
   zobristHash ^= Zobrist::psq[c][pt][to];
+
+#if defined(ENGINE_VARIANTS)
+  // Promotion status travels with the piece. Handling it here rather than in
+  // make_move covers the castling rook and the unmake path for free.
+  if (drops && (promoted & from_bb)) {
+    promoted ^= mask;
+    zobristHash ^= Zobrist::promotedSq[from] ^ Zobrist::promotedSq[to];
+  }
+#endif
 }
 
 Color Position::color_on(Square s) const {
@@ -177,11 +219,34 @@ bool Position::setFromFEN(std::string_view fen) {
   materialWb = 0;
   psqtWb = 0;
   gamePly = 0;
+#if defined(ENGINE_VARIANTS)
+  std::memset(hand, 0, sizeof(hand));
+  std::memset(handCount, 0, sizeof(handCount));
+  promoted = 0;
+#endif
 
   std::stringstream ss(std::string{fen});
   std::string board_str, side, castle, ep, half, full;
 
   ss >> board_str >> side >> castle >> ep >> half >> full;
+
+#if defined(ENGINE_VARIANTS)
+  // Crazyhouse and bughouse FEN carry the reserves in brackets appended to
+  // the board field, e.g. "8/8/...[QPpp]". Reject it outright in standard
+  // mode so a variant FEN can never be half-loaded into a standard search.
+  std::string hand_str;
+  const size_t bracket = board_str.find('[');
+  if (bracket != std::string::npos) {
+    if (!drops)
+      return false;
+    const size_t close = board_str.find(']', bracket);
+    if (close == std::string::npos)
+      return false;
+    hand_str = board_str.substr(bracket + 1, close - bracket - 1);
+    board_str.erase(bracket);
+  }
+  Square lastSquare = SQ_NONE;
+#endif
 
   int rank = 7;
   int file = 0;
@@ -191,6 +256,14 @@ bool Position::setFromFEN(std::string_view fen) {
       file = 0;
     } else if (isdigit(c)) {
       file += (c - '0');
+#if defined(ENGINE_VARIANTS)
+    } else if (c == '~') {
+      // Marks the piece just placed as promoted.
+      if (!drops || lastSquare == SQ_NONE)
+        return false;
+      promoted |= square_bb(lastSquare);
+      zobristHash ^= Zobrist::promotedSq[lastSquare];
+#endif
     } else {
       Color color = isupper(c) ? WHITE : BLACK;
       PieceType pt = NO_PIECE_TYPE;
@@ -216,10 +289,42 @@ bool Position::setFromFEN(std::string_view fen) {
       default:
         break;
       }
+#if defined(ENGINE_VARIANTS)
+      lastSquare = make_square((GenFile)file, (GenRank)rank);
+      put_piece(pt, color, lastSquare);
+#else
       put_piece(pt, color, make_square((GenFile)file, (GenRank)rank));
+#endif
       file++;
     }
   }
+
+#if defined(ENGINE_VARIANTS)
+  for (char c : hand_str) {
+    const Color color = isupper(c) ? WHITE : BLACK;
+    PieceType pt = NO_PIECE_TYPE;
+    switch (tolower(c)) {
+    case 'p':
+      pt = PAWN;
+      break;
+    case 'n':
+      pt = KNIGHT;
+      break;
+    case 'b':
+      pt = BISHOP;
+      break;
+    case 'r':
+      pt = ROOK;
+      break;
+    case 'q':
+      pt = QUEEN;
+      break;
+    default:
+      return false; // kings are never in hand
+    }
+    add_to_hand(color, pt);
+  }
+#endif
 
   sideToMove = (side == "w") ? WHITE : BLACK;
   if (sideToMove == BLACK)
@@ -303,6 +408,10 @@ std::string Position::toFEN() const {
         if (c == WHITE)
           pieceChar = static_cast<char>(toupper(pieceChar));
         ss << pieceChar;
+#if defined(ENGINE_VARIANTS)
+        if (drops && (promoted & square_bb(s)))
+          ss << '~';
+#endif
       }
     }
     if (emptyCount > 0)
@@ -310,6 +419,23 @@ std::string Position::toFEN() const {
     if (r > RANK_1)
       ss << '/';
   }
+#if defined(ENGINE_VARIANTS)
+  if (drops) {
+    ss << '[';
+    static constexpr char kHandChars[PIECE_TYPE_NB] = {0,   'p', 'n', 'b',
+                                                       'r', 'q', 0};
+    for (int c = WHITE; c <= BLACK; ++c) {
+      for (int pt = QUEEN; pt >= PAWN; --pt) {
+        const char ch = (c == WHITE)
+                            ? static_cast<char>(toupper(kHandChars[pt]))
+                            : kHandChars[pt];
+        for (int n = 0; n < hand[c][pt]; ++n)
+          ss << ch;
+      }
+    }
+    ss << ']';
+  }
+#endif
   ss << (sideToMove == WHITE ? " w " : " b ");
   if (castlingRights == 0) {
     ss << "-";
@@ -338,65 +464,99 @@ std::string Position::toFEN() const {
 void Position::make_move(Move m, UndoInfo &ui) {
   ASSERT_CONSISTENCY(*this);
 
-  Square from = m.from_sq();
   Square to = m.to_sq();
-  PieceType movingPiece = board[from];
 
   ui.capturedPiece = NO_PIECE_TYPE;
+#if defined(ENGINE_VARIANTS)
+  ui.capturedWasPromoted = false;
+#endif
   ui.castlingRights = castlingRights;
   ui.epSquare = epSquare;
   ui.halfmoveClock = halfmoveClock;
   ui.savedHash = zobristHash;
 
   bool resetClock = false;
-  if (movingPiece == PAWN)
+  Square newEpSquare = SQ_NONE;
+
+#if defined(ENGINE_VARIANTS)
+  if (m.is_drop()) {
+    // A drop is irreversible, so it resets the clock; it never creates an
+    // en-passant square, and it cannot spoil castling rights, because every
+    // square that would spoil them is occupied whenever those rights exist.
+    const PieceType dropped = m.dropped_piece();
+    remove_from_hand(sideToMove, dropped);
+    put_piece(dropped, sideToMove, to);
     resetClock = true;
+  } else
+#endif
+  {
+    Square from = m.from_sq();
+    PieceType movingPiece = board[from];
 
-  if (m.is_capture()) {
-    resetClock = true;
-    Square capSq = to;
-    if (m.is_en_passant()) {
-      capSq = make_square((GenFile)file_of(to), (GenRank)rank_of(from));
+    if (movingPiece == PAWN)
+      resetClock = true;
+
+    if (m.is_capture()) {
+      resetClock = true;
+      Square capSq = to;
+      if (m.is_en_passant()) {
+        capSq = make_square((GenFile)file_of(to), (GenRank)rank_of(from));
+      }
+      ui.capturedPiece = board[capSq];
+#if defined(ENGINE_VARIANTS)
+      if (drops) {
+        // A promoted piece reverts to a pawn in the capturer's hand. Read
+        // the flag before remove_piece clears it.
+        ui.capturedWasPromoted = (promoted & square_bb(capSq)) != 0;
+        add_to_hand(sideToMove,
+                    ui.capturedWasPromoted ? PAWN : ui.capturedPiece);
+      }
+#endif
+      remove_piece(~sideToMove, capSq);
+      castlingRights &= CastlingSpoilers[to];
     }
-    ui.capturedPiece = board[capSq];
-    remove_piece(~sideToMove, capSq);
-    castlingRights &= CastlingSpoilers[to];
-  }
 
-  move_piece(sideToMove, from, to);
+    move_piece(sideToMove, from, to);
 
-  if (m.is_promotion()) {
-    remove_piece(sideToMove, to);
-    put_piece(m.promotion_type(), sideToMove, to);
-  }
-
-  if (m.is_castling()) {
-    Square rFrom, rTo;
-    if (to > from) {
-      rFrom = make_square(FILE_H, (GenRank)rank_of(from));
-      rTo = make_square(FILE_F, (GenRank)rank_of(from));
-    } else {
-      rFrom = make_square(FILE_A, (GenRank)rank_of(from));
-      rTo = make_square(FILE_D, (GenRank)rank_of(from));
+    if (m.is_promotion()) {
+      remove_piece(sideToMove, to);
+      put_piece(m.promotion_type(), sideToMove, to);
+#if defined(ENGINE_VARIANTS)
+      if (drops) {
+        promoted |= square_bb(to);
+        zobristHash ^= Zobrist::promotedSq[to];
+      }
+#endif
     }
-    move_piece(sideToMove, rFrom, rTo);
+
+    if (m.is_castling()) {
+      Square rFrom, rTo;
+      if (to > from) {
+        rFrom = make_square(FILE_H, (GenRank)rank_of(from));
+        rTo = make_square(FILE_F, (GenRank)rank_of(from));
+      } else {
+        rFrom = make_square(FILE_A, (GenRank)rank_of(from));
+        rTo = make_square(FILE_D, (GenRank)rank_of(from));
+      }
+      move_piece(sideToMove, rFrom, rTo);
+    }
+
+    castlingRights &= CastlingSpoilers[from];
+
+    if (m.is_double_push()) {
+      newEpSquare =
+          (sideToMove == WHITE) ? (Square)(from + 8) : (Square)(from - 8);
+    }
   }
-
-  castlingRights &= CastlingSpoilers[from];
-
-  zobristHash ^= Zobrist::castling[ui.castlingRights];
-  zobristHash ^= Zobrist::castling[castlingRights];
 
   if (epSquare != SQ_NONE)
     zobristHash ^= Zobrist::enpassant[file_of(epSquare)];
-  epSquare = SQ_NONE;
-
-  if (m.is_double_push()) {
-    Square epCand =
-        (sideToMove == WHITE) ? (Square)(from + 8) : (Square)(from - 8);
-    epSquare = epCand;
+  epSquare = newEpSquare;
+  if (epSquare != SQ_NONE)
     zobristHash ^= Zobrist::enpassant[file_of(epSquare)];
-  }
+
+  zobristHash ^= Zobrist::castling[ui.castlingRights];
+  zobristHash ^= Zobrist::castling[castlingRights];
 
   if (resetClock)
     halfmoveClock = 0;
@@ -415,13 +575,28 @@ void Position::make_move(Move m, UndoInfo &ui) {
 }
 
 uint64_t Position::key_after(Move m) const {
-  const Square from = m.from_sq();
   const Square to = m.to_sq();
   const Color us = sideToMove;
   const Color them = ~us;
-  const PieceType movingPiece = board[from];
 
   uint64_t k = zobristHash;
+
+#if defined(ENGINE_VARIANTS)
+  if (m.is_drop()) {
+    const PieceType dropped = m.dropped_piece();
+    const int n = hand[us][dropped];
+    k ^= Zobrist::psq[us][dropped][to];
+    if (n <= MAX_IN_HAND)
+      k ^= Zobrist::hand[us][dropped][n] ^ Zobrist::hand[us][dropped][n - 1];
+    if (epSquare != SQ_NONE)
+      k ^= Zobrist::enpassant[file_of(epSquare)];
+    k ^= Zobrist::side;
+    return k;
+  }
+#endif
+
+  const Square from = m.from_sq();
+  const PieceType movingPiece = board[from];
   int newCastling = castlingRights;
 
   if (m.is_capture()) {
@@ -435,6 +610,18 @@ uint64_t Position::key_after(Move m) const {
     }
     k ^= Zobrist::psq[them][captured][capSq];
     newCastling &= CastlingSpoilers[to];
+
+#if defined(ENGINE_VARIANTS)
+    if (drops) {
+      const bool wasPromoted = (promoted & square_bb(capSq)) != 0;
+      const PieceType toHand = wasPromoted ? PAWN : captured;
+      const int n = hand[us][toHand];
+      if (n < MAX_IN_HAND)
+        k ^= Zobrist::hand[us][toHand][n] ^ Zobrist::hand[us][toHand][n + 1];
+      if (wasPromoted)
+        k ^= Zobrist::promotedSq[capSq];
+    }
+#endif
   }
 
   // Moving piece leaves `from` and lands on `to`; a promotion changes
@@ -442,6 +629,16 @@ uint64_t Position::key_after(Move m) const {
   k ^= Zobrist::psq[us][movingPiece][from];
   k ^=
       Zobrist::psq[us][m.is_promotion() ? m.promotion_type() : movingPiece][to];
+
+#if defined(ENGINE_VARIANTS)
+  if (drops) {
+    // Promotion marks `to`; an already-promoted piece carries its mark along.
+    if (m.is_promotion())
+      k ^= Zobrist::promotedSq[to];
+    else if (promoted & square_bb(from))
+      k ^= Zobrist::promotedSq[from] ^ Zobrist::promotedSq[to];
+  }
+#endif
 
   if (m.is_castling()) {
     Square rFrom, rTo;
@@ -478,12 +675,26 @@ void Position::unmake_move(Move m, const UndoInfo &ui) {
   if (sideToMove == BLACK)
     fullmoveNumber--;
 
-  Square from = m.from_sq();
   Square to = m.to_sq();
 
   // Restore pieces through the shared helpers so the mailbox and the
   // incremental psq score stay consistent; the hash they touch is
   // overwritten by the saved value below.
+#if defined(ENGINE_VARIANTS)
+  if (m.is_drop()) {
+    remove_piece(sideToMove, to);
+    add_to_hand(sideToMove, m.dropped_piece());
+    zobristHash = ui.savedHash;
+    epSquare = ui.epSquare;
+    castlingRights = ui.castlingRights;
+    halfmoveClock = ui.halfmoveClock;
+    ASSERT_CONSISTENCY(*this);
+    return;
+  }
+#endif
+
+  Square from = m.from_sq();
+
   if (m.is_promotion()) {
     remove_piece(sideToMove, to);
     put_piece(PAWN, sideToMove, from);
@@ -509,6 +720,14 @@ void Position::unmake_move(Move m, const UndoInfo &ui) {
       capSq = make_square((GenFile)file_of(to), (GenRank)rank_of(from));
     }
     put_piece(ui.capturedPiece, ~sideToMove, capSq);
+#if defined(ENGINE_VARIANTS)
+    if (drops) {
+      remove_from_hand(sideToMove,
+                       ui.capturedWasPromoted ? PAWN : ui.capturedPiece);
+      if (ui.capturedWasPromoted)
+        promoted |= square_bb(capSq);
+    }
+#endif
   }
 
   zobristHash = ui.savedHash;
@@ -547,6 +766,14 @@ void Position::unmake_null_move(const UndoInfo &ui) {
 }
 
 bool Position::is_repetition() const {
+  // Bughouse has no repetition draw: a repeated position on this board is
+  // not a repeated game state, because the partner board has moved on.
+  // Crazyhouse keeps the normal rule -- hands are hashed, so a repeated key
+  // really is a repeated position.
+#if defined(ENGINE_VARIANTS)
+  if (variant == VARIANT_BUGHOUSE)
+    return false;
+#endif
   // A repetition needs at least four reversible plies since the last
   // capture or pawn move; skip the history walk entirely below that.
   if (halfmoveClock < 4)

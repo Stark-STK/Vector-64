@@ -30,6 +30,34 @@ constexpr int MAX_DEPTH = 246;
 constexpr const char *STANDARD_STARTPOS_FEN =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
+#if defined(ENGINE_VARIANTS)
+// Same array, plus the empty-reserve field the drop variants expect.
+constexpr const char *DROP_STARTPOS_FEN =
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR[] w KQkq - 0 1";
+
+const char *startpos_fen(Core::Variant v) {
+  return v == Core::VARIANT_STANDARD ? STANDARD_STARTPOS_FEN
+                                     : DROP_STARTPOS_FEN;
+}
+
+// UCI_Variant values follow the usual engine convention.
+bool parse_variant(const std::string &name, Core::Variant &out) {
+  if (name == "chess" || name == "standard") {
+    out = Core::VARIANT_STANDARD;
+    return true;
+  }
+  if (name == "crazyhouse") {
+    out = Core::VARIANT_CRAZYHOUSE;
+    return true;
+  }
+  if (name == "bughouse") {
+    out = Core::VARIANT_BUGHOUSE;
+    return true;
+  }
+  return false;
+}
+#endif
+
 struct GoParams {
   bool ponder = false;
   bool infinite = false;
@@ -87,6 +115,22 @@ bool parse_square(const std::string &s, Core::Square &out) {
 bool move_matches_uci(Core::Move m, const std::string &uci) {
   if (uci.size() < 4 || uci.size() > 5)
     return false;
+#if defined(ENGINE_VARIANTS)
+  // Drop notation, e.g. "P@e4". The piece letter is conventionally
+  // uppercase regardless of colour.
+  if (uci[1] == '@') {
+    if (!m.is_drop() || uci.size() != 4)
+      return false;
+    Core::Square to = Core::SQ_NONE;
+    if (!parse_square(uci.substr(2, 2), to))
+      return false;
+    const char p =
+        static_cast<char>(std::toupper(static_cast<unsigned char>(uci[0])));
+    return m.to_sq() == to && drop_to_char(m.dropped_piece()) == p;
+  }
+  if (m.is_drop())
+    return false;
+#endif
   Core::Square from = Core::SQ_NONE;
   Core::Square to = Core::SQ_NONE;
   if (!parse_square(uci.substr(0, 2), from))
@@ -106,6 +150,12 @@ bool move_matches_uci(Core::Move m, const std::string &uci) {
 }
 
 bool looks_like_move(const std::string &token) {
+#if defined(ENGINE_VARIANTS)
+  if (token.size() == 4 && token[1] == '@') {
+    return token[2] >= 'a' && token[2] <= 'h' && token[3] >= '1' &&
+           token[3] <= '8';
+  }
+#endif
   return token.size() >= 4 && token.size() <= 5 && token[0] >= 'a' &&
          token[0] <= 'h' && token[1] >= '1' && token[1] <= '8' &&
          token[2] >= 'a' && token[2] <= 'h' && token[3] >= '1' &&
@@ -187,7 +237,12 @@ private:
     if (cmd == "ucinewgame") {
       stop_and_join(true);
       std::lock_guard<std::mutex> lock(positionMu_);
+#if defined(ENGINE_VARIANTS)
+      position_.set_variant(variant_);
+      position_.setFromFEN(startpos_fen(variant_));
+#else
       position_.setFromFEN(STANDARD_STARTPOS_FEN);
+#endif
       search_.clear();
       return true;
     }
@@ -249,6 +304,10 @@ private:
     // before it becomes a default.
     emit("option name PersistOrdering type check default true");
     emit("option name MultiPV type spin default 1 min 1 max 32");
+#if defined(ENGINE_VARIANTS)
+    emit("option name UCI_Variant type combo default chess var chess "
+         "var crazyhouse var bughouse");
+#endif
     emit("uciok");
   }
 
@@ -349,11 +408,52 @@ private:
       return;
     }
 
+#if defined(ENGINE_VARIANTS)
+    if (name == "uci_variant") {
+      Core::Variant v = Core::VARIANT_STANDARD;
+      if (!parse_variant(to_lower(value), v)) {
+        emit("info string setoption UCI_Variant: unknown variant '" + value +
+             "'");
+        return;
+      }
+      // Mirror of the EvalFile guard: a net loaded for standard chess cannot
+      // evaluate reserves and its accumulator has no drop update path, so
+      // refuse the switch instead of playing on a wrong evaluation.
+      if (v != Core::VARIANT_STANDARD && nnueLoaded_) {
+        emit("info string setoption UCI_Variant: refusing to switch to " +
+             value + " with an NNUE net loaded; restart and set UCI_Variant "
+                     "before EvalFile");
+        return;
+      }
+      stop_and_join(true);
+      variant_ = v;
+      std::lock_guard<std::mutex> lock(positionMu_);
+      position_.set_variant(variant_);
+      position_.setFromFEN(startpos_fen(variant_));
+      search_.clear();
+      return;
+    }
+#endif
+
     if (name == "ponder") {
       // The GUI drives pondering via `go ponder`; this flag is advisory.
       ponderEnabled_ = (to_lower(value) == "true");
       return;
     }
+
+#if defined(ENGINE_VARIANTS)
+    // The NNUE feature set has no reserve features and the accumulator has no
+    // drop update path, so a net loaded in a drop variant would evaluate
+    // reserves as invisible and desynchronise on the first drop. Refuse it
+    // rather than report a silently wrong score; the classical evaluation
+    // stays in use. See docs/variants.md section 12.
+    if ((name == "evalfile" || name == "evalfilesmall") &&
+        variant_ != Core::VARIANT_STANDARD) {
+      emit("info string " + name +
+           " ignored: no NNUE net is valid for a drop variant yet");
+      return;
+    }
+#endif
 
     if (name == "evalfile") {
       std::string path = value;
@@ -368,6 +468,9 @@ private:
 
       stop_and_join(true);
       if (search_.load_nnue(path)) {
+#if defined(ENGINE_VARIANTS)
+        nnueLoaded_ = true;
+#endif
         emit("info string EvalFile loaded: " + path);
       } else {
         emit("info string EvalFile load failed: " + path);
@@ -408,6 +511,9 @@ private:
 
       stop_and_join(true);
       if (search_.load_nnue_small(path)) {
+#if defined(ENGINE_VARIANTS)
+        nnueLoaded_ = true;
+#endif
         emit("info string EvalFileSmall loaded: " + path);
       } else {
         emit("info string EvalFileSmall load failed: " + path);
@@ -425,9 +531,17 @@ private:
       return;
     Core::Position next;
     size_t i = 1;
+#if defined(ENGINE_VARIANTS)
+    // Must precede setFromFEN so the bracketed reserve field parses.
+    next.set_variant(variant_);
+#endif
 
     if (tokens[i] == "startpos") {
+#if defined(ENGINE_VARIANTS)
+      next.setFromFEN(startpos_fen(variant_));
+#else
       next.setFromFEN(STANDARD_STARTPOS_FEN);
+#endif
       ++i;
     } else if (tokens[i] == "fen") {
       ++i;
@@ -882,6 +996,10 @@ private:
   int hashMb_ = 8;
   int moveOverheadMs_ = 30;
   bool statsInfo_ = false;
+#if defined(ENGINE_VARIANTS)
+  Core::Variant variant_ = Core::VARIANT_STANDARD;
+  bool nnueLoaded_ = false;
+#endif
   Search::EngineSearch search_{8};
 };
 } // namespace

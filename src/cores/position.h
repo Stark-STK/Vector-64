@@ -16,6 +16,11 @@ struct UndoInfo {
   int halfmoveClock;
   Square epSquare;
   PieceType capturedPiece;
+#if defined(ENGINE_VARIANTS)
+  // Drop variants: the captured piece had been promoted, so it entered the
+  // capturer's hand as a pawn and must be restored as its promoted type.
+  bool capturedWasPromoted;
+#endif
 };
 
 class Position {
@@ -45,6 +50,31 @@ public:
 
   PieceType piece_on(Square s) const { return board[s]; }
   Color color_on(Square s) const;
+
+#if defined(ENGINE_VARIANTS)
+  // Standard by default: with no drop variant selected no drop code runs,
+  // hands stay empty and hash-neutral, and standard play is identical to
+  // before drops existed. Set before setFromFEN so the hand field parses.
+  // The whole block compiles out unless ENGINE_VARIANTS is defined, so the
+  // standard binary carries neither the state nor the branches.
+  void set_variant(Variant v) {
+    variant = v;
+    drops = (v != VARIANT_STANDARD);
+  }
+  Variant variant_type() const { return variant; }
+  // True for crazyhouse and bughouse alike -- the board mechanics are shared.
+  bool has_drops() const { return drops; }
+
+  int in_hand(Color c, PieceType pt) const { return hand[c][pt]; }
+  bool has_any_in_hand(Color c) const { return handCount[c] != 0; }
+  // Squares holding a piece that reached its type by promotion; captured,
+  // such a piece returns to the capturer's hand as a pawn.
+  Bitboard promoted_pieces() const { return promoted; }
+#else
+  static constexpr bool has_drops() { return false; }
+  static constexpr int in_hand(Color, PieceType) { return 0; }
+  static constexpr bool has_any_in_hand(Color) { return false; }
+#endif
 
   Color side_to_move() const { return sideToMove; }
   Square ep_square() const { return epSquare; }
@@ -104,9 +134,27 @@ private:
   uint64_t history[MAX_GAME_PLY];
   int gamePly;
 
+#if defined(ENGINE_VARIANTS)
+  // Drop-variant state. `hand` counts captured pieces available to drop,
+  // `handCount` is the per-colour total so movegen can skip drop generation
+  // with one compare, and `promoted` tracks pieces that were promoted.
+  // `drops` caches `variant != VARIANT_STANDARD` so the hot paths test one
+  // bool rather than comparing the enum.
+  Variant variant;
+  bool drops;
+  uint8_t hand[COLOR_NB][PIECE_TYPE_NB];
+  uint8_t handCount[COLOR_NB];
+  Bitboard promoted;
+#endif
+
   void put_piece(PieceType pt, Color c, Square s);
   void remove_piece(Color c, Square s);
   void move_piece(Color c, Square from, Square to);
+
+#if defined(ENGINE_VARIANTS)
+  void add_to_hand(Color c, PieceType pt);
+  void remove_from_hand(Color c, PieceType pt);
+#endif
 };
 
 } // namespace Core

@@ -24,10 +24,39 @@ inline char promo_to_char(Core::PieceType pt) {
   }
 }
 
-// Long algebraic ("e2e4", "e7e8q"); "0000" for a null/invalid move.
+// Uppercase piece letter used by drop notation.
+inline char drop_to_char(Core::PieceType pt) {
+  switch (pt) {
+  case Core::PAWN:
+    return 'P';
+  case Core::KNIGHT:
+    return 'N';
+  case Core::BISHOP:
+    return 'B';
+  case Core::ROOK:
+    return 'R';
+  case Core::QUEEN:
+    return 'Q';
+  default:
+    return '?';
+  }
+}
+
+// Long algebraic ("e2e4", "e7e8q"), or drop notation ("P@e4") in the drop
+// variants; "0000" for a null/invalid move.
 inline std::string move_to_uci(Core::Move m) {
   if (!m.is_ok())
     return "0000";
+#if defined(ENGINE_VARIANTS)
+  if (m.is_drop()) {
+    char out[4];
+    out[0] = drop_to_char(m.dropped_piece());
+    out[1] = '@';
+    out[2] = static_cast<char>('a' + Core::file_of(m.to_sq()));
+    out[3] = static_cast<char>('1' + Core::rank_of(m.to_sq()));
+    return std::string(out, out + 4);
+  }
+#endif
   char out[6] = {0, 0, 0, 0, 0, 0};
   out[0] = static_cast<char>('a' + Core::file_of(m.from_sq()));
   out[1] = static_cast<char>('1' + Core::rank_of(m.from_sq()));

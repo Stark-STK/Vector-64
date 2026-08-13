@@ -7,8 +7,8 @@
 namespace Core {
 
 // Per-node legality context, built once per search node. `pinned` and
-// `checkers` make the common case — a non-king move of an unpinned piece
-// while not in check — legal by construction, no attack test needed.
+// `checkers` make the common case -- a non-king move of an unpinned piece
+// while not in check -- legal by construction, no attack test needed.
 // The pinned set is computed lazily on the first is_legal() call, so nodes
 // that cut off on the TT move (validated separately) never pay for it.
 struct NodeLegality {
@@ -43,6 +43,22 @@ void ensure_pins(const NodeLegality &nl);
 
 // Exact legality for pseudo-legal moves of the side to move.
 inline bool is_legal(const NodeLegality &nl, Move m) {
+#if defined(ENGINE_VARIANTS)
+  // A drop only ever adds a blocker, so it can never expose our own king --
+  // no pin or discovered-check test is needed. Out of check it is always
+  // legal; in check it must block, which is possible only against a single
+  // slider. between_bb is empty for knight and contact checks, so those fall
+  // out of the same test.
+  if (m.is_drop()) {
+    if (!nl.checkers)
+      return true;
+    if (nl.checkers & (nl.checkers - 1))
+      return false; // double check: only a king move can answer
+    return (Attacks::between_bb(nl.kingSq, lsb(nl.checkers)) &
+            square_bb(m.to_sq())) != 0;
+  }
+#endif
+
   const Square from = m.from_sq();
 #if defined(ENGINE_KING_DANGER)
   // Perft-only build option: a normal king move is legal iff its target
@@ -59,14 +75,14 @@ inline bool is_legal(const NodeLegality &nl, Move m) {
   if (!nl.pinsReady)
     ensure_pins(nl);
   if (nl.pinned & square_bb(from)) {
-    // A pinned piece may only move along the king–pinner line.
+    // A pinned piece may only move along the king-pinner line.
     return (Attacks::line_bb(nl.kingSq, from) & square_bb(m.to_sq())) != 0;
   }
   return true;
 }
 
 // True if the move could have been emitted by the pseudo-legal
-// generators for this position — validates piece, geometry, occupancy
+// generators for this position -- validates piece, geometry, occupancy
 // and flag consistency, so hash-collision or torn TT moves can never
 // corrupt make_move.
 bool is_pseudo_legal(const Position &pos, Move m);
