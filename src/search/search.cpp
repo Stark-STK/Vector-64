@@ -50,7 +50,7 @@ int see(const Core::Position &pos, Core::Move m) {
 
   // Diagonal/orthogonal slider sets (both colors). After removing an
   // attacker we only re-scan the ray it could have blocked, instead
-  // of rebuilding the whole attacker set — same values, far fewer
+  // of rebuilding the whole attacker set -- same values, far fewer
   // lookups. Node counts confirm behavioural equivalence.
   const Core::Bitboard bishopsQueens =
       pos.pieces(Core::BISHOP) | pos.pieces(Core::QUEEN);
@@ -485,7 +485,7 @@ HOT_FN int EngineSearch::quiescence(Core::Position &pos, int alpha, int beta,
       continue;
 
     // Skip captures that lose material outright. When the victim is
-    // worth at least the attacker, SEE >= 0 is guaranteed — skip the
+    // worth at least the attacker, SEE >= 0 is guaranteed -- skip the
     // swap loop, the pruning decision is identical.
     if (!inCheck && !move.is_promotion()) {
       const Core::PieceType victim =
@@ -552,8 +552,12 @@ HOT_FN int EngineSearch::negamax(Core::Position &pos, int depth, int alpha,
   if (stopped_)
     return 0;
 
-  // Draws by repetition or the fifty-move rule.
-  if (pos.is_repetition() || pos.halfmove_clock() >= 100)
+  // Draws by repetition or the fifty-move rule. is_repetition() already
+  // honours the draw-rule policy; the fifty-move test is gated here so a
+  // variant that has no fifty-move draw does not score one. Folds to a
+  // constant true in the standard build.
+  if (pos.is_repetition() ||
+      (pos.standard_draws() && pos.halfmove_clock() >= 100))
     return 0;
   if (ply >= MAX_PLY)
     return eval_->evaluate(pos);
@@ -1231,7 +1235,7 @@ Result EngineSearch::search_internal(Core::Position &root, const Limits &limits,
       (unsigned long long)profEvalCyc_, (unsigned long long)profUpdCyc_,
       (unsigned long long)profSmallCyc_);
   // NNUE forward sub-stage breakdown (big net): where the dense eval spends its
-  // ticks. Ticks are arch-specific (x86 TSC / arm64 cntvct) — read the %.
+  // ticks. Ticks are arch-specific (x86 TSC / arm64 cntvct) -- read the %.
   {
     const auto &f = prof::fwd;
     const uint64_t fwdTot = f.pairwiseCyc + f.l1Cyc + f.l2Cyc + f.outCyc;
@@ -1245,7 +1249,7 @@ Result EngineSearch::search_internal(Core::Position &root, const Limits &limits,
                  (unsigned long long)f.l2Cyc, (double)f.l2Cyc * fp,
                  (unsigned long long)f.outCyc, (double)f.outCyc * fp);
     // Accumulator update: incremental (acc_fused2) vs king-move refresh (the
-    // memory-heavy full FT gather) — the classic NNUE memory bottleneck.
+    // memory-heavy full FT gather) -- the classic NNUE memory bottleneck.
     const uint64_t updTot = f.updIncrCyc + f.updKingCyc;
     const double up = updTot ? 100.0 / (double)updTot : 0.0;
     std::fprintf(

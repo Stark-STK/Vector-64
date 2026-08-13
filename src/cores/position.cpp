@@ -113,6 +113,8 @@ Position::Position() {
 #if defined(ENGINE_VARIANTS)
   variant = VARIANT_STANDARD;
   drops = false;
+  standardDraws = true;
+  handFromCaptures = false;
   std::memset(hand, 0, sizeof(hand));
   std::memset(handCount, 0, sizeof(handCount));
   promoted = 0;
@@ -505,11 +507,14 @@ void Position::make_move(Move m, UndoInfo &ui) {
       ui.capturedPiece = board[capSq];
 #if defined(ENGINE_VARIANTS)
       if (drops) {
-        // A promoted piece reverts to a pawn in the capturer's hand. Read
-        // the flag before remove_piece clears it.
+        // A promoted piece reverts to a pawn in the reserve. Read the flag
+        // before remove_piece clears it -- it is reported to the host even in
+        // bughouse, where the piece goes to the partner board's reserve
+        // rather than this one.
         ui.capturedWasPromoted = (promoted & square_bb(capSq)) != 0;
-        add_to_hand(sideToMove,
-                    ui.capturedWasPromoted ? PAWN : ui.capturedPiece);
+        if (handFromCaptures)
+          add_to_hand(sideToMove,
+                      ui.capturedWasPromoted ? PAWN : ui.capturedPiece);
       }
 #endif
       remove_piece(~sideToMove, capSq);
@@ -614,10 +619,12 @@ uint64_t Position::key_after(Move m) const {
 #if defined(ENGINE_VARIANTS)
     if (drops) {
       const bool wasPromoted = (promoted & square_bb(capSq)) != 0;
-      const PieceType toHand = wasPromoted ? PAWN : captured;
-      const int n = hand[us][toHand];
-      if (n < MAX_IN_HAND)
-        k ^= Zobrist::hand[us][toHand][n] ^ Zobrist::hand[us][toHand][n + 1];
+      if (handFromCaptures) {
+        const PieceType toHand = wasPromoted ? PAWN : captured;
+        const int n = hand[us][toHand];
+        if (n < MAX_IN_HAND)
+          k ^= Zobrist::hand[us][toHand][n] ^ Zobrist::hand[us][toHand][n + 1];
+      }
       if (wasPromoted)
         k ^= Zobrist::promotedSq[capSq];
     }
@@ -722,8 +729,9 @@ void Position::unmake_move(Move m, const UndoInfo &ui) {
     put_piece(ui.capturedPiece, ~sideToMove, capSq);
 #if defined(ENGINE_VARIANTS)
     if (drops) {
-      remove_from_hand(sideToMove,
-                       ui.capturedWasPromoted ? PAWN : ui.capturedPiece);
+      if (handFromCaptures)
+        remove_from_hand(sideToMove,
+                         ui.capturedWasPromoted ? PAWN : ui.capturedPiece);
       if (ui.capturedWasPromoted)
         promoted |= square_bb(capSq);
     }
@@ -765,13 +773,29 @@ void Position::unmake_null_move(const UndoInfo &ui) {
   ASSERT_CONSISTENCY(*this);
 }
 
+#if defined(ENGINE_VARIANTS)
+int Position::repetition_count() const {
+  if (!standardDraws)
+    return 0;
+  if (halfmoveClock < 4)
+    return 0;
+  int n = 0;
+  const int start = std::max(0, gamePly - halfmoveClock);
+  for (int i = gamePly - 2; i >= start; i -= 2) {
+    if (history[i] == zobristHash)
+      ++n;
+  }
+  return n;
+}
+#endif
+
 bool Position::is_repetition() const {
   // Bughouse has no repetition draw: a repeated position on this board is
   // not a repeated game state, because the partner board has moved on.
   // Crazyhouse keeps the normal rule -- hands are hashed, so a repeated key
   // really is a repeated position.
 #if defined(ENGINE_VARIANTS)
-  if (variant == VARIANT_BUGHOUSE)
+  if (!standardDraws)
     return false;
 #endif
   // A repetition needs at least four reversible plies since the last

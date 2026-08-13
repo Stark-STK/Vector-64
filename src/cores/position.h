@@ -60,10 +60,41 @@ public:
   void set_variant(Variant v) {
     variant = v;
     drops = (v != VARIANT_STANDARD);
+    standardDraws = (v != VARIANT_BUGHOUSE);
+    handFromCaptures = (v == VARIANT_CRAZYHOUSE);
   }
   Variant variant_type() const { return variant; }
   // True for crazyhouse and bughouse alike -- the board mechanics are shared.
   bool has_drops() const { return drops; }
+
+  // Draw-rule policy, selectable independently of the variant. Real bughouse
+  // has neither a repetition nor a fifty-move draw, because the partner board
+  // keeps the game state moving; a host that adjudicates draws per board may
+  // want the standard rules anyway. set_variant picks the variant-appropriate
+  // default, so call this after it to override.
+  void set_standard_draws(bool v) { standardDraws = v; }
+  bool standard_draws() const { return standardDraws; }
+
+  // Crazyhouse: a captured piece enters the capturer's own reserve. Bughouse:
+  // it enters the *partner's* reserve on the other board, which this engine
+  // cannot see -- so captures add nothing here and the reserve changes only
+  // when the host injects one via the FEN. Callers learn what a capture
+  // produced from UndoInfo (see captured_drop_type).
+  bool captures_fill_hand() const { return handFromCaptures; }
+
+  // The piece type a capture sends to a reserve, after the promoted-piece
+  // revert (a captured promoted queen becomes a pawn). NO_PIECE_TYPE when the
+  // move captured nothing.
+  static PieceType captured_drop_type(Move m, const UndoInfo &ui) {
+    if (!m.is_capture() || ui.capturedPiece == NO_PIECE_TYPE)
+      return NO_PIECE_TYPE;
+    return ui.capturedWasPromoted ? PAWN : ui.capturedPiece;
+  }
+
+  // Times the current position occurred earlier inside the fifty-move window.
+  // Threefold is a count of 2 or more. Distinct from is_repetition(), which is
+  // the search's twofold convention.
+  int repetition_count() const;
 
   int in_hand(Color c, PieceType pt) const { return hand[c][pt]; }
   bool has_any_in_hand(Color c) const { return handCount[c] != 0; }
@@ -74,6 +105,9 @@ public:
   static constexpr bool has_drops() { return false; }
   static constexpr int in_hand(Color, PieceType) { return 0; }
   static constexpr bool has_any_in_hand(Color) { return false; }
+  // Standard chess always uses the standard draw rules, so the search's
+  // fifty-move test folds to a constant in the tournament build.
+  static constexpr bool standard_draws() { return true; }
 #endif
 
   Color side_to_move() const { return sideToMove; }
@@ -142,6 +176,8 @@ private:
   // bool rather than comparing the enum.
   Variant variant;
   bool drops;
+  bool standardDraws;
+  bool handFromCaptures;
   uint8_t hand[COLOR_NB][PIECE_TYPE_NB];
   uint8_t handCount[COLOR_NB];
   Bitboard promoted;

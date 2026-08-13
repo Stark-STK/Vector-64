@@ -95,7 +95,9 @@ set(CORE_HEADERS
         src/cores/types.h
         src/cores/bitboard.h
         src/cores/move.h
+        src/cores/material.h
         src/cores/invariants.h
+        src/uci/validator.h
         src/search/transposition_table.h
         src/search/move_ordering.h
         src/search/evaluator.h
@@ -152,7 +154,22 @@ if(ENGINE_VARIANTS)
         target_link_libraries(ChessEngine-variants chess_core_variants)
         set_target_properties(ChessEngine-variants PROPERTIES
                 RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+        # Lean validator: the same core, started in validator mode. It runs no
+        # search and needs no net, so a host can keep a resident pool of these
+        # for legality/terminal queries without them queueing behind searches.
+        add_executable(ChessEngine-validator
+                app/main.cpp
+                tests/cpp/perfts.cpp
+                tests/cpp/perfts.h
+        )
+        target_compile_definitions(ChessEngine-validator PRIVATE STK_VALIDATOR_ONLY)
+        target_include_directories(ChessEngine-validator PRIVATE tests/cpp)
+        target_link_libraries(ChessEngine-validator chess_core_variants)
+        set_target_properties(ChessEngine-validator PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
         message(STATUS "Variant binary: ChessEngine-variants (crazyhouse, bughouse)")
+        message(STATUS "Validator binary: ChessEngine-validator (no search, no net)")
 endif()
 
 # ---------------------------------------------------------------------------

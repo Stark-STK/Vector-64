@@ -1,7 +1,7 @@
 # STK-Vector-64 Variant Support
 
-Status: Crazyhouse and bughouse board mechanics implemented; search and
-evaluation tuning outstanding (section 12).
+Status: Crazyhouse and bughouse board mechanics and the host integration
+surface implemented; search and evaluation tuning outstanding (section 13).
 
 Shipped as a separate binary, `ChessEngine-variants`, selected at runtime with
 `setoption name UCI_Variant value crazyhouse|bughouse`.
@@ -386,7 +386,81 @@ matrix's `ctest` step. It runs four checks:
 The standard gates are unchanged and still pass: both bench signatures, the
 six-position perft suite, and `consistency.make_unmake_and_movegen`.
 
-## 12. Remaining Work
+## 12. Host Integration Surface
+
+A host that treats the engine as the single source of chess truth needs more
+than UCI: it must be able to read a position back, enumerate legal moves, and
+get structured terminal and error information. That surface lives in
+`src/uci/validator.h` and is available in any `ENGINE_VARIANTS` build.
+
+Every reply is one line of compact JSON, hand-built so `cores/` gains no
+third-party dependency. The position is whatever the preceding `position`
+command established, so a worker holds no game identity and any worker can
+answer any request.
+
+| Command | Reply |
+|---|---|
+| `getfen` | `{"ok":true,"fen":...,"variant":...,"drawRules":...}` |
+| `legalmoves` | `{"ok":true,"count":N,"moves":[...]}` -- exact UCI, promotions and drops enumerated |
+| `apply <uci>` | `{"ok":true,"legal":true,"fen":...,"sideToMove":...,"inCheck":...,"terminal":...,"capturedDropType":...}` |
+| `status` | `{"ok":true,"sideToMove":...,"inCheck":...,"terminal":...,"legalCount":N,"repetitions":k}` |
+| `canmate <w\|b>` | `{"ok":true,"side":...,"canMate":...}` |
+
+`terminal` is one of `none`, `checkmate`, `stalemate`, `draw_fifty_move`,
+`draw_threefold`, `draw_insufficient_material`.
+
+Failures carry a fixed taxonomy the host can branch on, never collapsed into
+one signal: `illegal_move` (well-formed, not legal here), `malformed_request`
+(unparseable move or argument), `internal_error` (engine fault; evict the
+worker).
+
+### 12.1 Two tiers
+
+`ChessEngine-validator` is the lean tier: one thread, a 1 MB table, no net, and
+`go`/`bench` refused outright so a validator can never queue behind a search.
+`ChessEngine-variants --validator` gives the same mode from the full binary.
+Search requests go to `ChessEngine-variants` in its normal mode.
+
+`isready`/`readyok` is the health probe. Startup allocates a 1 MB table and the
+attack tables, nothing else.
+
+### 12.2 Reserves are the host's to move
+
+This is the one place the engine deliberately does *less* than crazyhouse.
+
+- **Crazyhouse:** a capture enters the capturer's own reserve. The engine does
+  this itself.
+- **Bughouse:** a capture enters the **partner's** reserve on the *other*
+  board, which this engine cannot see. So a bughouse capture adds nothing to
+  either reserve here; the engine reports `capturedDropType` and the host
+  injects it into the partner board's position. `Position::captures_fill_hand()`
+  is the switch, set from the variant.
+
+A bughouse position therefore only gains material through an injected FEN,
+which is exactly the `[...]` reserve field. There is no separate hand-injection
+call because the position already carries it.
+
+### 12.3 Draw rules
+
+Real bughouse has neither a repetition nor a fifty-move draw, because the
+partner board keeps the game state moving. A host that adjudicates draws per
+board may want them anyway, so the policy is selectable independently of the
+variant: `setoption name DrawRules value variant|standard`. `variant` (the
+default) gives each variant its own rules; `standard` forces threefold and
+fifty-move on for every variant.
+
+`repetition_count()` reports occurrences within the fifty-move window, so the
+host gets true threefold (count >= 2) rather than the twofold convention the
+search uses internally. Repetition is detected from the moves supplied on the
+`position ... moves ...` command, so the host passes history as a move list.
+
+### 12.4 Determinism
+
+Identical `(position, moves, variant, draw rules)` always yields an identical
+validator result -- none of that surface searches. **Search** results are
+deterministic only at `Threads 1`; lazy SMP is non-deterministic by design.
+
+## 13. Remaining Work
 
 The board mechanics are correct and the engine plays legal crazyhouse and
 bughouse. It does not yet play them *well*. In rough priority order:
@@ -411,7 +485,7 @@ bughouse. It does not yet play them *well*. In rough priority order:
    (section 10). Until this exists, bughouse mode is crazyhouse with the repetition
    and fifty-move draws switched off.
 
-## 13. Open Questions
+## 14. Open Questions
 
 - Does drop-check quiescence need its own depth limit, or does the existing
   quiescence depth cap suffice once the drop subset is bounded?

@@ -1,6 +1,7 @@
 #include "uci.h"
 
 #include "uci_util.h"
+#include "validator.h"
 
 #include "../cores/attacks.h"
 #include "../cores/movegen.h"
@@ -194,13 +195,22 @@ public:
   // supplied by main() -- loaded so the engine plays with NNUE out of the box
   // (setoption EvalFile still overrides). The classical binary passes nullptr.
   explicit EngineUci(const unsigned char *embeddedNet = nullptr,
-                     std::size_t embeddedNetSize = 0) {
-    const unsigned hc = std::max(1u, std::thread::hardware_concurrency());
-    threads_ = static_cast<int>(hc);
+                     std::size_t embeddedNetSize = 0,
+                     bool validatorOnly = false) {
+    validatorOnly_ = validatorOnly;
+    if (validatorOnly_) {
+      // Nothing here searches, so give the table the minimum and stay
+      // single-threaded: startup cost is what matters for a resident pool.
+      threads_ = 1;
+      hashMb_ = 1;
+    } else {
+      const unsigned hc = std::max(1u, std::thread::hardware_concurrency());
+      threads_ = static_cast<int>(hc);
+    }
     position_.setFromFEN(STANDARD_STARTPOS_FEN);
     search_.set_hash_mb(static_cast<size_t>(hashMb_));
     search_.set_threads(threads_);
-    if (embeddedNet && embeddedNetSize)
+    if (embeddedNet && embeddedNetSize && !validatorOnly_)
       search_.load_nnue_buffer(embeddedNet, embeddedNetSize);
   }
 
@@ -216,6 +226,106 @@ public:
   }
 
 private:
+#if defined(ENGINE_VARIANTS)
+  // Every Position the loop builds goes through here, so the variant and the
+  // draw-rule policy can never disagree between the resident position and a
+  // freshly parsed one.
+  void apply_variant(Core::Position &p) const {
+    p.set_variant(variant_);
+    if (forceStandardDraws_)
+      p.set_standard_draws(true);
+  }
+#endif
+
+#if defined(ENGINE_VARIANTS)
+  // Validator surface (see validator.h). Every reply is one JSON line, so the
+  // Adapter never parses free-form stdout. Runs entirely on the resident
+  // position set by `position`; no search is started and no net is needed.
+  void handle_validator(const std::string &cmd,
+                        const std::vector<std::string> &tokens) {
+    namespace V = UCI::Validator;
+    std::lock_guard<std::mutex> lock(positionMu_);
+
+    if (cmd == "getfen") {
+      emit(V::json_getfen(position_));
+      return;
+    }
+    if (cmd == "legalmoves") {
+      emit(V::json_legalmoves(position_));
+      return;
+    }
+    if (cmd == "status") {
+      emit(V::json_status(position_));
+      return;
+    }
+    if (cmd == "canmate") {
+      if (tokens.size() < 2) {
+        emit(V::json_error(V::ERR_MALFORMED, "canmate needs a side: w or b"));
+        return;
+      }
+      const std::string side = to_lower(tokens[1]);
+      if (side != "w" && side != "b" && side != "white" && side != "black") {
+        emit(V::json_error(V::ERR_MALFORMED, "side must be w or b"));
+        return;
+      }
+      const Core::Color c =
+          (side == "w" || side == "white") ? Core::WHITE : Core::BLACK;
+      emit(V::json_canmate(position_, c));
+      return;
+    }
+
+    // apply <uci>: validate and, if legal, commit. The reply carries the
+    // resulting position so the host never has to reconstruct it.
+    if (tokens.size() < 2) {
+      emit(V::json_error(V::ERR_MALFORMED, "apply needs a move"));
+      return;
+    }
+    const std::string &uci = tokens[1];
+    if (!looks_like_move(uci)) {
+      emit(V::json_error(V::ERR_MALFORMED, "unparseable move '" + uci + "'"));
+      return;
+    }
+
+    Core::MoveList legal;
+    Core::generate_legal_moves(position_, legal);
+    Core::Move chosen = Core::Move::none();
+    for (int i = 0; i < legal.size(); ++i) {
+      if (move_matches_uci(legal[i], uci)) {
+        chosen = legal[i];
+        break;
+      }
+    }
+    if (!chosen.is_ok()) {
+      emit(V::json_error(V::ERR_ILLEGAL, "not legal in this position"));
+      return;
+    }
+
+    Core::UndoInfo undo{};
+    position_.make_move(chosen, undo);
+    const Core::PieceType dropType =
+        Core::Position::captured_drop_type(chosen, undo);
+
+    std::string out = "{\"ok\":true,\"legal\":true,\"fen\":\"";
+    out += position_.toFEN();
+    out += "\",\"sideToMove\":\"";
+    out += (position_.side_to_move() == Core::WHITE ? "w" : "b");
+    out += "\",\"inCheck\":";
+    out += (position_.in_check() ? "true" : "false");
+    out += ",\"terminal\":\"";
+    out += V::terminal_state(position_);
+    out += "\",\"capturedDropType\":";
+    if (dropType == Core::NO_PIECE_TYPE) {
+      out += "null";
+    } else {
+      out += '"';
+      out += V::drop_type_char(dropType);
+      out += '"';
+    }
+    out += '}';
+    emit(out);
+  }
+#endif
+
   bool handle_command(const std::string &line) {
     std::vector<std::string> tokens = split_ws(line);
     if (tokens.empty())
@@ -238,7 +348,7 @@ private:
       stop_and_join(true);
       std::lock_guard<std::mutex> lock(positionMu_);
 #if defined(ENGINE_VARIANTS)
-      position_.set_variant(variant_);
+      apply_variant(position_);
       position_.setFromFEN(startpos_fen(variant_));
 #else
       position_.setFromFEN(STANDARD_STARTPOS_FEN);
@@ -250,11 +360,26 @@ private:
       handle_position(tokens);
       return true;
     }
+#if defined(ENGINE_VARIANTS)
+    if (cmd == "getfen" || cmd == "legalmoves" || cmd == "status" ||
+        cmd == "canmate" || cmd == "apply") {
+      handle_validator(cmd, tokens);
+      return true;
+    }
+#endif
     if (cmd == "eval") {
       std::lock_guard<std::mutex> lock(positionMu_);
       int score = search_.evaluate(position_);
       emit("info string evaluation score: " + std::to_string(score) + " cp");
       return true;
+    }
+    if (cmd == "go" || cmd == "bench") {
+      if (validatorOnly_) {
+        // A validator worker must never start a search: that is the whole
+        // point of keeping the two tiers in separate pools.
+        emit("info string refused: this is a validator-only worker");
+        return true;
+      }
     }
     if (cmd == "bench") {
       handle_bench(tokens);
@@ -307,6 +432,8 @@ private:
 #if defined(ENGINE_VARIANTS)
     emit("option name UCI_Variant type combo default chess var chess "
          "var crazyhouse var bughouse");
+    emit("option name DrawRules type combo default variant var variant "
+         "var standard");
 #endif
     emit("uciok");
   }
@@ -409,6 +536,25 @@ private:
     }
 
 #if defined(ENGINE_VARIANTS)
+    if (name == "drawrules") {
+      const std::string v = to_lower(value);
+      if (v != "variant" && v != "standard") {
+        emit("info string setoption DrawRules: expected 'variant' or "
+             "'standard', got '" +
+             value + "'");
+        return;
+      }
+      stop_and_join(true);
+      forceStandardDraws_ = (v == "standard");
+      std::lock_guard<std::mutex> lock(positionMu_);
+      // Re-apply to the resident position; the variant and FEN are unchanged.
+      if (forceStandardDraws_)
+        position_.set_standard_draws(true);
+      else
+        position_.set_standard_draws(variant_ != Core::VARIANT_BUGHOUSE);
+      return;
+    }
+
     if (name == "uci_variant") {
       Core::Variant v = Core::VARIANT_STANDARD;
       if (!parse_variant(to_lower(value), v)) {
@@ -428,7 +574,7 @@ private:
       stop_and_join(true);
       variant_ = v;
       std::lock_guard<std::mutex> lock(positionMu_);
-      position_.set_variant(variant_);
+      apply_variant(position_);
       position_.setFromFEN(startpos_fen(variant_));
       search_.clear();
       return;
@@ -533,7 +679,7 @@ private:
     size_t i = 1;
 #if defined(ENGINE_VARIANTS)
     // Must precede setFromFEN so the bracketed reserve field parses.
-    next.set_variant(variant_);
+    apply_variant(next);
 #endif
 
     if (tokens[i] == "startpos") {
@@ -996,19 +1142,25 @@ private:
   int hashMb_ = 8;
   int moveOverheadMs_ = 30;
   bool statsInfo_ = false;
+  bool validatorOnly_ = false;
 #if defined(ENGINE_VARIANTS)
   Core::Variant variant_ = Core::VARIANT_STANDARD;
+  // "variant" = each variant's own rules (bughouse has no repetition or
+  // fifty-move draw); "standard" = force the standard draw rules regardless,
+  // for a host that adjudicates draws per board.
+  bool forceStandardDraws_ = false;
   bool nnueLoaded_ = false;
 #endif
   Search::EngineSearch search_{8};
 };
 } // namespace
 
-int run(const unsigned char *embeddedNet, std::size_t embeddedNetSize) {
+int run(const unsigned char *embeddedNet, std::size_t embeddedNetSize,
+        bool validatorOnly) {
   Core::Attacks::init();
   Core::Zobrist::init();
 
-  EngineUci app(embeddedNet, embeddedNetSize);
+  EngineUci app(embeddedNet, embeddedNetSize, validatorOnly);
   return app.loop();
 }
 } // namespace UCI

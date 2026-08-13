@@ -15,14 +15,17 @@
 //     therefore agree with standard chess exactly through depth 4, and must
 //     exceed it at depth 5 (where the first drops appear).
 #include "cores/attacks.h"
+#include "cores/material.h"
 #include "cores/movegen.h"
 #include "cores/position.h"
 #include "cores/zobrist.h"
 #include "perfts.h"
+#include "uci/validator.h"
 
 #include <cstdio>
 #include <random>
 #include <string>
+#include <vector>
 
 using namespace Core;
 
@@ -30,6 +33,12 @@ namespace {
 
 constexpr const char *DROP_STARTPOS =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR[] w KQkq - 0 1";
+
+// Bughouse reserves are fed by the partner board, which this engine cannot
+// see, so captures here add nothing to either hand. A bughouse run therefore
+// has to start from an injected reserve or it would never see a drop.
+constexpr const char *BUGHOUSE_STOCKED =
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR[QRBNPqrbnp] w KQkq - 0 1";
 
 int failures = 0;
 
@@ -162,7 +171,16 @@ bool check_drop_shape(const Position &pos, Move m) {
   return true;
 }
 
-bool run_games(Variant v, const char *label, int games, int maxPlies) {
+int total_in_hand(const Position &pos) {
+  int n = 0;
+  for (int c = WHITE; c <= BLACK; ++c)
+    for (int pt = PAWN; pt <= QUEEN; ++pt)
+      n += pos.in_hand(static_cast<Color>(c), static_cast<PieceType>(pt));
+  return n;
+}
+
+bool run_games(Variant v, const char *label, const char *startFen, int games,
+               int maxPlies) {
   std::mt19937_64 rng(0xD40D5ULL + static_cast<uint64_t>(v));
   uint64_t dropsPlayed = 0;
   uint64_t promotedCaptures = 0;
@@ -170,8 +188,8 @@ bool run_games(Variant v, const char *label, int games, int maxPlies) {
   for (int game = 0; game < games; ++game) {
     Position pos;
     pos.set_variant(v);
-    if (!pos.setFromFEN(DROP_STARTPOS)) {
-      fail("variant start position did not parse", DROP_STARTPOS);
+    if (!pos.setFromFEN(startFen)) {
+      fail("variant start position did not parse", startFen);
       return false;
     }
 
@@ -198,6 +216,7 @@ bool run_games(Variant v, const char *label, int games, int maxPlies) {
       const std::string fenBefore = pos.toFEN();
       const int matBefore = pos.material_wb();
       const int psqtBefore = pos.psqt_wb();
+      const int handBefore = total_in_hand(pos);
 
       // key_after drives the search's pre-make TT prefetch, so it must equal
       // the real post-move hash for drops too.
@@ -225,6 +244,14 @@ bool run_games(Variant v, const char *label, int games, int maxPlies) {
       }
       if (!check_against_rebuild(pos, v))
         return false;
+
+      // Bughouse captures feed the partner board's reserve, not this one, so
+      // the only way a hand grows here is an injected FEN.
+      if (!pos.captures_fill_hand() && move.is_capture() &&
+          total_in_hand(pos) != handBefore) {
+        fail("bughouse capture changed a reserve on this board", fenBefore);
+        return false;
+      }
 
       pos.unmake_move(move, undo);
       if (pos.hash() != hashBefore || pos.material_wb() != matBefore ||
@@ -306,6 +333,170 @@ bool check_fen_isolation() {
   return true;
 }
 
+// --- Validator surface -----------------------------------------------------
+
+bool expect_terminal(const char *fen, Variant v, const char *want,
+                     const char *what) {
+  Position pos;
+  pos.set_variant(v);
+  if (!pos.setFromFEN(fen)) {
+    fail("terminal case FEN did not parse", fen);
+    return false;
+  }
+  const std::string got = UCI::Validator::terminal_state(pos);
+  if (got != want) {
+    std::printf("FAIL: %s -- terminal is '%s', expected '%s'\n  %s\n", what,
+                got.c_str(), want, fen);
+    ++failures;
+    return false;
+  }
+  return true;
+}
+
+bool run_validator_checks() {
+  // Terminal detection, in the vocabulary the host consumes.
+  if (!expect_terminal("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w "
+                       "KQkq - 1 3",
+                       VARIANT_STANDARD, "checkmate", "fool's mate"))
+    return false;
+  if (!expect_terminal("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1", VARIANT_STANDARD,
+                       "stalemate", "stalemate"))
+    return false;
+  if (!expect_terminal("8/8/4k3/8/8/4KB2/8/8 w - - 0 1", VARIANT_STANDARD,
+                       "draw_insufficient_material", "K+B vs K"))
+    return false;
+  if (!expect_terminal("8/8/4k3/8/8/4K3/8/6R1 w - - 100 60", VARIANT_STANDARD,
+                       "draw_fifty_move", "fifty-move"))
+    return false;
+
+  // Mating material, per side. A lone minor cannot mate; two can.
+  {
+    Position pos;
+    pos.setFromFEN("8/8/4k3/8/8/4KB2/8/8 w - - 0 1");
+    if (can_side_mate(pos, WHITE) || can_side_mate(pos, BLACK)) {
+      fail("K+B vs K reported as able to mate", pos.toFEN());
+      return false;
+    }
+    pos.setFromFEN("8/8/4k3/8/8/4KBN1/8/8 w - - 0 1");
+    if (!can_side_mate(pos, WHITE) || can_side_mate(pos, BLACK)) {
+      fail("K+B+N vs K mating material misreported", pos.toFEN());
+      return false;
+    }
+  }
+
+  // In a drop variant a reserve alone is sufficient: the bare king below can
+  // still be mated by a dropped piece.
+  {
+    Position pos;
+    pos.set_variant(VARIANT_CRAZYHOUSE);
+    pos.setFromFEN("8/8/4k3/8/8/4K3/8/8[Q] w - - 0 1");
+    if (!can_side_mate(pos, WHITE)) {
+      fail("reserve piece not counted as mating material", pos.toFEN());
+      return false;
+    }
+    if (can_side_mate(pos, BLACK)) {
+      fail("empty-reserve bare king reported as able to mate", pos.toFEN());
+      return false;
+    }
+  }
+
+  // capturedDropType must report the promotion revert: a captured promoted
+  // queen enters a reserve as a pawn, not as a queen.
+  {
+    Position pos;
+    pos.set_variant(VARIANT_CRAZYHOUSE);
+    if (!pos.setFromFEN("3Q~3k/8/8/8/8/K7/8/3r4[] b - - 0 1")) {
+      fail("promoted-piece FEN did not parse", "3Q~3k/8/8/8/8/K7/8/3r4[]");
+      return false;
+    }
+    MoveList legal;
+    generate_legal_moves(pos, legal);
+    Move capture = Move::none();
+    for (int i = 0; i < legal.size(); ++i) {
+      if (legal[i].to_sq() == SQ_D8 && legal[i].is_capture())
+        capture = legal[i];
+    }
+    if (!capture.is_ok()) {
+      fail("no capture of the promoted queen was generated", pos.toFEN());
+      return false;
+    }
+    UndoInfo undo{};
+    pos.make_move(capture, undo);
+    const PieceType dropType = Position::captured_drop_type(capture, undo);
+    if (dropType != PAWN) {
+      std::printf("FAIL: captured promoted queen reports drop type %d, "
+                  "expected PAWN (%d)\n",
+                  int(dropType), int(PAWN));
+      ++failures;
+      return false;
+    }
+    if (pos.in_hand(BLACK, PAWN) != 1 || pos.in_hand(BLACK, QUEEN) != 0) {
+      fail("promoted queen entered the reserve as a queen", pos.toFEN());
+      return false;
+    }
+  }
+
+  // Draw-rule policy: bughouse defaults to neither repetition nor fifty-move,
+  // and the host can force the standard rules back on.
+  {
+    Position pos;
+    pos.set_variant(VARIANT_BUGHOUSE);
+    pos.setFromFEN("8/8/4k3/8/8/4K3/8/6R1[] w - - 100 60");
+    if (pos.standard_draws()) {
+      fail("bughouse defaulted to standard draw rules", pos.toFEN());
+      return false;
+    }
+    if (std::string(UCI::Validator::terminal_state(pos)) != "none") {
+      fail("bughouse scored a fifty-move draw", pos.toFEN());
+      return false;
+    }
+    pos.set_standard_draws(true);
+    if (std::string(UCI::Validator::terminal_state(pos)) != "draw_fifty_move") {
+      fail("forced standard draws did not restore the fifty-move draw",
+           pos.toFEN());
+      return false;
+    }
+  }
+
+  // Threefold is counted, not just detected as twofold: shuffling knights
+  // back to the start position must reach a repetition count of 2.
+  {
+    Position pos;
+    pos.setFromFEN("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    const char *shuffle[] = {"g1f3", "g8f6", "f3g1", "f6g8",
+                             "g1f3", "g8f6", "f3g1", "f6g8"};
+    std::vector<UndoInfo> undos;
+    for (const char *uci : shuffle) {
+      MoveList legal;
+      generate_legal_moves(pos, legal);
+      Move chosen = Move::none();
+      for (int i = 0; i < legal.size(); ++i) {
+        if (UCI::move_to_uci(legal[i]) == uci)
+          chosen = legal[i];
+      }
+      if (!chosen.is_ok()) {
+        fail(std::string("shuffle move not legal: ").append(uci).c_str(),
+             pos.toFEN());
+        return false;
+      }
+      undos.emplace_back();
+      pos.make_move(chosen, undos.back());
+    }
+    if (pos.repetition_count() < 2) {
+      std::printf("FAIL: repetition_count() is %d after a threefold shuffle, "
+                  "expected at least 2\n",
+                  pos.repetition_count());
+      ++failures;
+      return false;
+    }
+  }
+
+  std::printf("PASS: validator -- terminal states, mating material, "
+              "capturedDropType promotion revert, draw-rule policy, "
+              "threefold counting\n");
+  return true;
+}
+
 } // namespace
 
 int main() {
@@ -316,9 +507,11 @@ int main() {
     return 1;
   if (!run_perft_anchors())
     return 1;
-  if (!run_games(VARIANT_CRAZYHOUSE, "crazyhouse", 150, 120))
+  if (!run_validator_checks())
     return 1;
-  if (!run_games(VARIANT_BUGHOUSE, "bughouse", 150, 120))
+  if (!run_games(VARIANT_CRAZYHOUSE, "crazyhouse", DROP_STARTPOS, 150, 120))
+    return 1;
+  if (!run_games(VARIANT_BUGHOUSE, "bughouse", BUGHOUSE_STOCKED, 150, 120))
     return 1;
 
   return failures == 0 ? 0 : 1;
