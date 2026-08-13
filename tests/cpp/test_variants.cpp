@@ -298,7 +298,8 @@ bool run_perft_anchors() {
       return false;
     }
   }
-  std::printf("PASS: crazyhouse perft matches standard chess through depth 4\n");
+  std::printf(
+      "PASS: crazyhouse perft matches standard chess through depth 4\n");
 
   // At depth 5 the first drops become legal, so the count must exceed chess.
   Position pos;

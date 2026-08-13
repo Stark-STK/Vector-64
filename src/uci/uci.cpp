@@ -567,8 +567,9 @@ private:
       // refuse the switch instead of playing on a wrong evaluation.
       if (v != Core::VARIANT_STANDARD && nnueLoaded_) {
         emit("info string setoption UCI_Variant: refusing to switch to " +
-             value + " with an NNUE net loaded; restart and set UCI_Variant "
-                     "before EvalFile");
+             value +
+             " with an NNUE net loaded; restart and set UCI_Variant "
+             "before EvalFile");
         return;
       }
       stop_and_join(true);

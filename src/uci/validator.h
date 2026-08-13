@@ -23,16 +23,19 @@
 //   malformed_request  unparseable move, side, or arguments
 //   internal_error     engine fault; the host should evict the worker
 //
-// Commands (each consumes the caller-supplied position, so a worker holds no
-// game identity and any worker can answer any request):
+// Commands. Each runs on the caller-supplied position, so a worker holds no
+// game identity and any worker can answer any request.
 //
-//   getfen                 -> {"ok":true,"fen":...,"variant":...,"drawRules":...}
-//   legalmoves             -> {"ok":true,"count":N,"moves":[...]}
-//   apply <uci>            -> {"ok":true,"legal":true,"fen":...,"sideToMove":...,
-//                              "inCheck":...,"terminal":...,"capturedDropType":...}
-//   status                 -> {"ok":true,"sideToMove":...,"inCheck":...,
-//                              "terminal":...,"legalCount":N,"repetitions":k}
-//   canmate <w|b>          -> {"ok":true,"side":...,"canMate":...}
+//   getfen        fen, variant, drawRules
+//   legalmoves    count, moves[] as exact UCI strings
+//   apply <uci>   legal, fen, sideToMove, inCheck, terminal, capturedDropType
+//   status        sideToMove, inCheck, terminal, legalCount, repetitions
+//   canmate <w|b> side, canMate
+//
+// `capturedDropType` is the piece a capture sends to a reserve, already
+// reverted to a pawn if the captured piece had been promoted, or null when
+// the move captured nothing. `repetitions` counts prior occurrences of the
+// current position, so threefold is a value of 2 or more.
 
 namespace UCI::Validator {
 
@@ -94,8 +97,8 @@ inline const char *terminal_state(Core::Position &pos) {
 inline std::string json_getfen(const Core::Position &pos) {
   return std::string("{\"ok\":true,\"fen\":\"") + pos.toFEN() +
          "\",\"variant\":\"" + variant_name(pos.variant_type()) +
-         "\",\"drawRules\":\"" + (pos.standard_draws() ? "standard" : "variant") +
-         "\"}";
+         "\",\"drawRules\":\"" +
+         (pos.standard_draws() ? "standard" : "variant") + "\"}";
 }
 
 inline std::string json_legalmoves(Core::Position &pos) {
@@ -134,8 +137,9 @@ inline std::string json_status(Core::Position &pos) {
 
 inline std::string json_canmate(const Core::Position &pos, Core::Color c) {
   return std::string("{\"ok\":true,\"side\":\"") +
-         (c == Core::WHITE ? "w" : "b") + "\",\"canMate\":" +
-         (Core::can_side_mate(pos, c) ? "true" : "false") + "}";
+         (c == Core::WHITE ? "w" : "b") +
+         "\",\"canMate\":" + (Core::can_side_mate(pos, c) ? "true" : "false") +
+         "}";
 }
 
 } // namespace UCI::Validator
