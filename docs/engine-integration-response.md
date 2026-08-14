@@ -127,7 +127,24 @@ reserve is sufficient on its own** -- a bare king with a queen in hand can
 still mate. If you adjudicate bughouse or crazyhouse flags, this call is
 correct there as well.
 
-### 2.5 Read the position back
+### 2.5 Single-line requests
+
+Every validator command may carry its own position as a suffix, so a request
+is self-contained in one line and no worker needs to be paired across calls:
+
+```
+> legalmoves fen 7k/8/8/8/8/8/8/K5R1[Q] w - - 0 1
+> status startpos moves e2e4 e7e5
+> apply e4d5 fen <FEN> moves <uci> ...
+> canmate b fen <FEN>
+```
+
+The clause is `fen <6 fields> [moves ...]` or `startpos [moves ...]`. No move
+or side argument can equal `fen` or `startpos`, so the split is unambiguous.
+A single-line request never mutates the worker's resident position; the
+two-line form still does, so both styles keep working.
+
+### 2.6 Read the position back
 
 Not in your doc, but nothing in section 2 works without it:
 
@@ -305,6 +322,16 @@ Implemented over standard UCI on `ChessEngine-variants`:
   (positive favours the side to move).
 - **PV:** `info ... pv <uci> <uci> ...`.
 - **MultiPV:** `setoption name MultiPV value <n>`, up to 32.
+- **JSON summary:** `setoption name SearchJson value true` adds one structured
+  line after `bestmove`, so the Adapter needs no `info`-line scraping:
+
+```
+bestmove Q@g7
+{"bestMove":"Q@g7","score":{"mate":1},"pv":["Q@g7"],"depth":6}
+```
+
+  It is emitted *after* `bestmove`, never instead of it, so plain UCI clients
+  are unaffected. `score` carries either `cp` or `mate`, never both.
 
 No book, no networking, no persistence, per your section 6.
 

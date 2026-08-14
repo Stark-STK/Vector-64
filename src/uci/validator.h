@@ -44,9 +44,24 @@ constexpr const char *ERR_ILLEGAL = "illegal_move";
 constexpr const char *ERR_MALFORMED = "malformed_request";
 constexpr const char *ERR_INTERNAL = "internal_error";
 
+// Reason strings can quote caller input, which may contain anything; escape
+// so a malformed request can never produce malformed JSON.
+inline std::string json_escape(const std::string &s) {
+  std::string out;
+  out.reserve(s.size() + 8);
+  for (char c : s) {
+    if (c == '"' || c == '\\')
+      out += '\\';
+    if (static_cast<unsigned char>(c) < 0x20)
+      continue; // drop control characters outright
+    out += c;
+  }
+  return out;
+}
+
 inline std::string json_error(const char *code, const std::string &reason) {
   return std::string("{\"ok\":false,\"error\":\"") + code + "\",\"reason\":\"" +
-         reason + "\"}";
+         json_escape(reason) + "\"}";
 }
 
 inline const char *variant_name(Core::Variant v) {

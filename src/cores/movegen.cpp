@@ -549,4 +549,50 @@ void generate_legal_captures(Position &pos, MoveList &moves) {
   filter_legal(pos, moves);
 }
 
+#if defined(ENGINE_VARIANTS)
+void generate_drop_checks(const Position &pos, MoveList &moves) {
+  const Color us = pos.side_to_move();
+  const Color them = ~us;
+  const Bitboard kingBB = pos.pieces(KING, them);
+  if (!kingBB)
+    return;
+
+  const Square ksq = lsb(kingBB);
+  const Bitboard occ = pos.occupancy();
+  const Bitboard empty = ~occ;
+
+  auto emit = [&](PieceType pt, Bitboard targets) {
+    while (targets)
+      moves.push_back(Move::make_drop(pt, pop_lsb(targets)));
+  };
+
+  // A piece checks from exactly the squares it would attack the king from,
+  // which by symmetry is the king square's own attack set for that piece.
+  if (pos.in_hand(us, KNIGHT))
+    emit(KNIGHT, Attacks::knight_attacks(ksq) & empty);
+
+  const bool wantBishop = pos.in_hand(us, BISHOP) != 0;
+  const bool wantRook = pos.in_hand(us, ROOK) != 0;
+  const bool wantQueen = pos.in_hand(us, QUEEN) != 0;
+  const Bitboard diag =
+      (wantBishop || wantQueen) ? Attacks::bishop_attacks(ksq, occ) & empty : 0;
+  const Bitboard orth =
+      (wantRook || wantQueen) ? Attacks::rook_attacks(ksq, occ) & empty : 0;
+
+  if (wantBishop)
+    emit(BISHOP, diag);
+  if (wantRook)
+    emit(ROOK, orth);
+  if (wantQueen)
+    emit(QUEEN, diag | orth);
+
+  if (pos.in_hand(us, PAWN)) {
+    // The squares one of our pawns would check from are the squares an enemy
+    // pawn standing on the king square would attack.
+    emit(PAWN,
+         Attacks::pawn_attacks(ksq, them) & empty & ~(RANK_1_BB | RANK_8_BB));
+  }
+}
+#endif
+
 } // namespace Core

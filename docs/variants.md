@@ -465,14 +465,24 @@ deterministic only at `Threads 1`; lazy SMP is non-deterministic by design.
 The board mechanics are correct and the engine plays legal crazyhouse and
 bughouse. It does not yet play them *well*. In rough priority order:
 
-1. **Drop-checks in quiescence.** Drops are generated as quiet moves, so
-   `generate_legal_captures` -- and therefore qsearch -- never sees them. In a
-   drop variant the main tactical motif is a checking drop, so the engine will
-   hang forced mates until qsearch generates a bounded, ordered subset of
-   checking drops. This is the single largest strength gap.
-2. **Drop-aware SEE and capture ordering.** A capture donates the captured
-   piece to the opponent's reserve, so MVV-LVA and SEE are not merely
-   mistuned but semantically wrong (section 7).
+1. ~~**Drop-checks in quiescence.**~~ **Done.** `generate_drop_checks`
+   (`src/cores/movegen.cpp`) emits exactly the legal drops that give check --
+   only squares on a ray to the enemy king, or a knight/pawn hop from it, so
+   the set is naturally bounded to a few dozen rather than every empty square.
+   Quiescence generates them for the first `DROP_CHECK_QDEPTH` (2) plies;
+   deeper would explode, since every check hands the opponent a full set of
+   evasions. The generator is verified against brute force at every ply of the
+   300 randomised games. **The depth limit and the drop ordering score are
+   untuned starting points, not SPRT results.**
+2. **Drop-aware SEE.** Partly done. The *correctness* half is fixed: `see()`
+   is never called on a drop (its `from_sq` holds a piece type, so it would
+   read a nonsense attacker), drops are excluded from the `[from][to]` history
+   table they would otherwise alias into, and every site that needs a moving
+   piece type goes through `moved_piece()`. The *modelling* half is still
+   open: a capture donates the captured piece to a reserve, and the exchange
+   evaluation does not account for that. Fixing it means putting a value on
+   material-in-hand, which is a tuning question that needs SPRT rather than a
+   guess.
 3. **Pruning retune.** Null move, reverse futility and LMR margins all encode
    chess assumptions that drop variants violate. Each is an SPRT question.
 4. **Evaluation.** `PieceValue` needs a variant table plus terms for material

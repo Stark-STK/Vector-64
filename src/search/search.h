@@ -122,8 +122,12 @@ private:
               const Limits &limits, const Callbacks &callbacks,
               Core::Move excludedMove = Core::Move::none());
 
+  // `qDepth` counts plies inside quiescence itself (0 at entry from
+  // negamax). Drop variants use it to bound checking-drop generation to the
+  // shallowest qsearch plies; the standard build ignores it entirely.
   int quiescence(Core::Position &pos, int alpha, int beta, int ply,
-                 const Limits &limits, const Callbacks &callbacks);
+                 const Limits &limits, const Callbacks &callbacks,
+                 int qDepth = 0);
 
   int search_root(Core::Position &root, Core::MoveList &rootMoves, int depth,
                   int alpha, int beta, Core::Move prevBest,

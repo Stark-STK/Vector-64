@@ -171,6 +171,51 @@ bool check_drop_shape(const Position &pos, Move m) {
   return true;
 }
 
+// generate_drop_checks feeds quiescence, so it must be exactly the set of
+// legal drops that give check -- no more (wasted qsearch nodes) and no fewer
+// (missed forced mates, which is the bug it exists to fix). Verified against
+// brute force: play every legal drop and ask whether the opponent is in check.
+bool check_drop_check_generator(Position &pos) {
+  if (!pos.has_drops() || !pos.has_any_in_hand(pos.side_to_move()))
+    return true;
+
+  MoveList all;
+  generate_legal_moves(pos, all);
+  MoveList expected;
+  for (int i = 0; i < all.size(); ++i) {
+    if (!all[i].is_drop())
+      continue;
+    UndoInfo u{};
+    pos.make_move(all[i], u);
+    const bool givesCheck = pos.in_check();
+    pos.unmake_move(all[i], u);
+    if (givesCheck)
+      expected.push_back(all[i]);
+  }
+
+  MoveList generated;
+  generate_drop_checks(pos, generated);
+  const NodeLegality nl = make_node_legality(pos);
+  MoveList got;
+  for (int i = 0; i < generated.size(); ++i) {
+    if (is_legal(nl, generated[i]))
+      got.push_back(generated[i]);
+  }
+
+  if (got.size() != expected.size()) {
+    fail("drop-check generator produced the wrong number of checking drops",
+         pos.toFEN());
+    return false;
+  }
+  for (int i = 0; i < expected.size(); ++i) {
+    if (!list_contains(got, expected[i])) {
+      fail("drop-check generator missed a checking drop", pos.toFEN());
+      return false;
+    }
+  }
+  return true;
+}
+
 int total_in_hand(const Position &pos) {
   int n = 0;
   for (int c = WHITE; c <= BLACK; ++c)
@@ -200,6 +245,8 @@ bool run_games(Variant v, const char *label, const char *startFen, int games,
         break;
 
       if (!check_movegen(pos, rng))
+        return false;
+      if (!check_drop_check_generator(pos))
         return false;
 
       const Move move =

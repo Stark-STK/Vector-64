@@ -241,21 +241,96 @@ private:
   // Validator surface (see validator.h). Every reply is one JSON line, so the
   // Adapter never parses free-form stdout. Runs entirely on the resident
   // position set by `position`; no search is started and no net is needed.
+  // Parses an inline position clause: `fen <fields> [moves ...]` or
+  // `startpos [moves ...]`. Lets one line carry a whole request so the host
+  // never has to pair two lines onto the same worker.
+  bool parse_inline_position(const std::vector<std::string> &tokens, size_t i,
+                             Core::Position &out, std::string &err) const {
+    apply_variant(out);
+    if (i >= tokens.size()) {
+      err = "empty position clause";
+      return false;
+    }
+    if (tokens[i] == "startpos") {
+      out.setFromFEN(startpos_fen(variant_));
+      ++i;
+    } else {
+      ++i; // consume "fen"
+      std::string fen;
+      int parts = 0;
+      while (i < tokens.size() && tokens[i] != "moves" && parts < 6) {
+        if (!fen.empty())
+          fen += " ";
+        fen += tokens[i++];
+        ++parts;
+      }
+      if (parts < 4 || !out.setFromFEN(fen)) {
+        err = "invalid fen: " + fen;
+        return false;
+      }
+      if (out.opponent_in_check()) {
+        err = "illegal fen: side not to move is in check";
+        return false;
+      }
+    }
+    if (i < tokens.size() && tokens[i] == "moves")
+      ++i;
+    for (; i < tokens.size(); ++i) {
+      Core::MoveList legal;
+      Core::generate_legal_moves(out, legal);
+      Core::Move chosen = Core::Move::none();
+      for (int k = 0; k < legal.size(); ++k) {
+        if (move_matches_uci(legal[k], tokens[i])) {
+          chosen = legal[k];
+          break;
+        }
+      }
+      if (!chosen.is_ok()) {
+        err = "illegal move in history: " + tokens[i];
+        return false;
+      }
+      Core::UndoInfo undo{};
+      out.make_move(chosen, undo);
+    }
+    return true;
+  }
+
   void handle_validator(const std::string &cmd,
                         const std::vector<std::string> &tokens) {
     namespace V = UCI::Validator;
     std::lock_guard<std::mutex> lock(positionMu_);
 
+    // A request may carry its own position as a suffix. No move or side
+    // argument can equal "fen" or "startpos", so the split is unambiguous.
+    size_t clauseAt = 0;
+    for (size_t k = 1; k < tokens.size(); ++k) {
+      if (tokens[k] == "fen" || tokens[k] == "startpos") {
+        clauseAt = k;
+        break;
+      }
+    }
+
+    Core::Position scratch;
+    Core::Position *target = &position_;
+    if (clauseAt != 0) {
+      std::string err;
+      if (!parse_inline_position(tokens, clauseAt, scratch, err)) {
+        emit(V::json_error(V::ERR_MALFORMED, err));
+        return;
+      }
+      target = &scratch;
+    }
+
     if (cmd == "getfen") {
-      emit(V::json_getfen(position_));
+      emit(V::json_getfen(*target));
       return;
     }
     if (cmd == "legalmoves") {
-      emit(V::json_legalmoves(position_));
+      emit(V::json_legalmoves(*target));
       return;
     }
     if (cmd == "status") {
-      emit(V::json_status(position_));
+      emit(V::json_status(*target));
       return;
     }
     if (cmd == "canmate") {
@@ -270,7 +345,7 @@ private:
       }
       const Core::Color c =
           (side == "w" || side == "white") ? Core::WHITE : Core::BLACK;
-      emit(V::json_canmate(position_, c));
+      emit(V::json_canmate(*target, c));
       return;
     }
 
@@ -287,7 +362,7 @@ private:
     }
 
     Core::MoveList legal;
-    Core::generate_legal_moves(position_, legal);
+    Core::generate_legal_moves(*target, legal);
     Core::Move chosen = Core::Move::none();
     for (int i = 0; i < legal.size(); ++i) {
       if (move_matches_uci(legal[i], uci)) {
@@ -300,19 +375,21 @@ private:
       return;
     }
 
+    // The two-line form commits to the resident position; the single-line
+    // form is self-contained and leaves the worker untouched.
     Core::UndoInfo undo{};
-    position_.make_move(chosen, undo);
+    target->make_move(chosen, undo);
     const Core::PieceType dropType =
         Core::Position::captured_drop_type(chosen, undo);
 
     std::string out = "{\"ok\":true,\"legal\":true,\"fen\":\"";
-    out += position_.toFEN();
+    out += target->toFEN();
     out += "\",\"sideToMove\":\"";
-    out += (position_.side_to_move() == Core::WHITE ? "w" : "b");
+    out += (target->side_to_move() == Core::WHITE ? "w" : "b");
     out += "\",\"inCheck\":";
-    out += (position_.in_check() ? "true" : "false");
+    out += (target->in_check() ? "true" : "false");
     out += ",\"terminal\":\"";
-    out += V::terminal_state(position_);
+    out += V::terminal_state(*target);
     out += "\",\"capturedDropType\":";
     if (dropType == Core::NO_PIECE_TYPE) {
       out += "null";
@@ -434,6 +511,7 @@ private:
          "var crazyhouse var bughouse");
     emit("option name DrawRules type combo default variant var variant "
          "var standard");
+    emit("option name SearchJson type check default false");
 #endif
     emit("uciok");
   }
@@ -536,6 +614,11 @@ private:
     }
 
 #if defined(ENGINE_VARIANTS)
+    if (name == "searchjson") {
+      jsonSearch_ = (to_lower(value) == "true");
+      return;
+    }
+
     if (name == "drawrules") {
       const std::string v = to_lower(value);
       if (v != "variant" && v != "standard") {
@@ -933,6 +1016,18 @@ private:
             << "% negamax " << info.negamaxTtHitRate << "%";
       emit(stats.str());
     }
+
+#if defined(ENGINE_VARIANTS)
+    // Snapshot for the JSON summary emitted next to bestmove, so a host has
+    // one structured parser instead of scraping these info lines.
+    if (jsonSearch_) {
+      jsonDepth_ = info.depth;
+      jsonScoreCp_ = info.scoreCp;
+      jsonPv_.clear();
+      for (int i = 0; i < info.pvLen; ++i)
+        jsonPv_.push_back(move_to_uci(info.pv[i]));
+    }
+#endif
   }
 
   void emit_bestmove(uint64_t searchId, Core::Move bestMove,
@@ -943,6 +1038,29 @@ private:
     if (ponderMove.is_ok())
       line += " ponder " + move_to_uci(ponderMove);
     emit(line);
+
+#if defined(ENGINE_VARIANTS)
+    // Emitted after bestmove, never instead of it: plain UCI clients keep
+    // working unchanged and only a host that asked for it sees this line.
+    if (jsonSearch_) {
+      std::string js = "{\"bestMove\":\"" + move_to_uci(bestMove) + "\"";
+      if (ponderMove.is_ok())
+        js += ",\"ponder\":\"" + move_to_uci(ponderMove) + "\"";
+      js += ",\"score\":{";
+      if (Search::is_mate_score(jsonScoreCp_))
+        js += "\"mate\":" + std::to_string(Search::mate_in_moves(jsonScoreCp_));
+      else
+        js += "\"cp\":" + std::to_string(jsonScoreCp_);
+      js += "},\"pv\":[";
+      for (size_t i = 0; i < jsonPv_.size(); ++i) {
+        if (i)
+          js += ',';
+        js += '"' + jsonPv_[i] + '"';
+      }
+      js += "],\"depth\":" + std::to_string(jsonDepth_) + "}";
+      emit(js);
+    }
+#endif
   }
 
   void search_worker(uint64_t searchId, const GoParams &params) {
@@ -1151,6 +1269,11 @@ private:
   // for a host that adjudicates draws per board.
   bool forceStandardDraws_ = false;
   bool nnueLoaded_ = false;
+  // SearchJson: emit a structured summary line after bestmove.
+  bool jsonSearch_ = false;
+  int jsonDepth_ = 0;
+  int jsonScoreCp_ = 0;
+  std::vector<std::string> jsonPv_;
 #endif
   Search::EngineSearch search_{8};
 };

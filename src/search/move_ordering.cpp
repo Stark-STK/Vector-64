@@ -8,6 +8,11 @@ constexpr int TT_MOVE_SCORE = 2'000'000;
 constexpr int CAPTURE_BASE_SCORE = 1'000'000;
 constexpr int KILLER_1_SCORE = 900'000;
 constexpr int KILLER_2_SCORE = 899'000;
+#if defined(ENGINE_VARIANTS)
+// Below every capture, above killers: a checking drop is tactical, but a
+// capture that wins material is still the better first guess. Untuned.
+constexpr int DROP_CHECK_BASE_SCORE = 950'000;
+#endif
 
 int piece_order_value(Core::PieceType pieceType) {
   switch (pieceType) {
@@ -132,6 +137,18 @@ int MoveOrdering::score_move(const Core::Position &pos, Core::Move move,
     return TT_MOVE_SCORE;
   if (move.is_capture())
     return CAPTURE_BASE_SCORE + mvv_lva(pos, move);
+
+#if defined(ENGINE_VARIANTS)
+  // Drops carry a piece type in the from_sq field, so they must never reach
+  // the history table below -- they would alias with real moves out of
+  // b1..f1. Quiescence only ever generates checking drops, so rank them just
+  // under captures, cheapest piece first: spending a pawn to check is
+  // usually better than spending a queen for the same check.
+  if (move.is_drop()) {
+    return DROP_CHECK_BASE_SCORE -
+           piece_order_value(move.dropped_piece()) * 1024;
+  }
+#endif
 
   if (ply >= 0 && ply < MAX_PLY) {
     if (move == killers_[ply][0])

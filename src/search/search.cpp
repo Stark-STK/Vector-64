@@ -21,8 +21,20 @@
 namespace Search {
 namespace {
 
+// The piece type a move places on its destination. A drop carries the type in
+// its from_sq field, so piece_on() must never be used for one. Folds to plain
+// piece_on() in the standard build.
+inline Core::PieceType moved_piece(const Core::Position &pos, Core::Move m) {
+#if defined(ENGINE_VARIANTS)
+  if (m.is_drop())
+    return m.dropped_piece();
+#endif
+  return pos.piece_on(m.from_sq());
+}
+
 // Static exchange evaluation (swap algorithm). Returns the expected
-// material gain of the capture from the mover's point of view.
+// material gain of the capture from the mover's point of view. Never called
+// with a drop: a drop captures nothing and has no origin square.
 int see(const Core::Position &pos, Core::Move m) {
   const Core::Square to = m.to_sq();
   const Core::Square from = m.from_sq();
@@ -204,6 +216,17 @@ public:
       Core::generate_pseudo_quiets(pos_, list_);
       for (int i = 0; i < list_.size(); ++i) {
         const Core::Move q = list_[i];
+#if defined(ENGINE_VARIANTS)
+        // Drops keep out of history_ (see the update site): score them from
+        // continuation history alone, biased toward spending the cheapest
+        // piece. Untuned.
+        if (q.is_drop()) {
+          scores_[i] = ordering_.cont_score(prevPt_, prevTo_, q.dropped_piece(),
+                                            q.to_sq()) -
+                       64 * static_cast<int>(q.dropped_piece());
+          continue;
+        }
+#endif
         scores_[i] =
             ordering_.history_score(pos_.side_to_move(), q) +
             ordering_.cont_score(prevPt_, prevTo_, pos_.piece_on(q.from_sq()),
@@ -399,7 +422,7 @@ void EngineSearch::update_pv(int ply, Core::Move move) {
 // (e.g., stopping search while a queen is en prise).
 HOT_FN int EngineSearch::quiescence(Core::Position &pos, int alpha, int beta,
                                     int ply, const Limits &limits,
-                                    const Callbacks &callbacks) {
+                                    const Callbacks &callbacks, int qDepth) {
   pvLen_[ply] = 0;
 
   nodes_++;
@@ -468,6 +491,19 @@ HOT_FN int EngineSearch::quiescence(Core::Position &pos, int alpha, int beta,
     movesAreLegal = true;
   } else {
     Core::generate_pseudo_captures(pos, moves);
+#if defined(ENGINE_VARIANTS)
+    // Drop variants: a checking drop, not a capture, is the main tactical
+    // motif, so a captures-only quiescence walks straight past forced mates.
+    // Bounded to the shallowest qsearch plies -- every check hands the
+    // opponent a full set of evasions, so generating them all the way down
+    // explodes the tree. The depth limit is a conservative starting point and
+    // has not been SPRT-tuned.
+    constexpr int DROP_CHECK_QDEPTH = 2;
+    if (qDepth < DROP_CHECK_QDEPTH && pos.has_drops() &&
+        pos.has_any_in_hand(pos.side_to_move())) {
+      Core::generate_drop_checks(pos, moves);
+    }
+#endif
     movesAreLegal = false;
   }
 
@@ -486,8 +522,10 @@ HOT_FN int EngineSearch::quiescence(Core::Position &pos, int alpha, int beta,
 
     // Skip captures that lose material outright. When the victim is
     // worth at least the attacker, SEE >= 0 is guaranteed -- skip the
-    // swap loop, the pruning decision is identical.
-    if (!inCheck && !move.is_promotion()) {
+    // swap loop, the pruning decision is identical. Drops are excluded:
+    // they capture nothing, and their from_sq field holds a piece type
+    // rather than a square, so piece_on() would read nonsense.
+    if (!inCheck && !move.is_promotion() && !move.is_drop()) {
       const Core::PieceType victim =
           move.is_en_passant() ? Core::PAWN : pos.piece_on(move.to_sq());
       const Core::PieceType attacker = pos.piece_on(move.from_sq());
@@ -510,7 +548,7 @@ HOT_FN int EngineSearch::quiescence(Core::Position &pos, int alpha, int beta,
       PROF_ADD(profUpdCyc_, profUpds_);
     }
     const int score =
-        -quiescence(pos, -beta, -alpha, ply + 1, limits, callbacks);
+        -quiescence(pos, -beta, -alpha, ply + 1, limits, callbacks, qDepth + 1);
     pos.unmake_move(move, undo);
 
     if (stopped_)
@@ -742,14 +780,16 @@ HOT_FN int EngineSearch::negamax(Core::Position &pos, int depth, int alpha,
     // lose too much material by static exchange. Quiets get a linear margin
     // (a quiet that hangs a piece is almost never best); captures a looser
     // quadratic one, since a losing capture can begin a deeper tactic.
-    if (!isPVNode && !inCheck && !move.is_promotion() && movesSearched >= 1 &&
-        bestScore > -MATE_BOUND && depth <= 8) {
+    // Drops are excluded: see() reads piece_on(from_sq), which is meaningless
+    // for a move whose from_sq field holds a piece type.
+    if (!isPVNode && !inCheck && !move.is_promotion() && !move.is_drop() &&
+        movesSearched >= 1 && bestScore > -MATE_BOUND && depth <= 8) {
       const int seeMargin = isQuiet ? -50 * depth : -20 * depth * depth;
       if (see(pos, move) < seeMargin)
         continue;
     }
 
-    const Core::PieceType movedPt = pos.piece_on(move.from_sq());
+    const Core::PieceType movedPt = moved_piece(pos, move);
 
     tt_->prefetch(pos.key_after(move));
     Core::UndoInfo undo{};
@@ -821,13 +861,20 @@ HOT_FN int EngineSearch::negamax(Core::Position &pos, int depth, int alpha,
       if (!excludedMove.is_ok()) {
         if (isQuiet) {
           ordering_.update_killers(ply, move);
-          ordering_.update_history(us, move, depth);
+          // history_ is keyed [from][to]; a drop has no from square, so
+          // writing it there would corrupt the entry for real moves out of
+          // b1..f1. Killers and continuation history are safe: killers
+          // compare whole moves, and cont uses the piece type, which
+          // moved_piece supplies correctly for drops.
+          if (!move.is_drop())
+            ordering_.update_history(us, move, depth);
           ordering_.update_cont(prevPt, prevTo, movedPt, move.to_sq(), depth);
           for (int q = 0; q < quietsCount; ++q) {
             const Core::Move qm = quietsTried[q];
-            ordering_.update_history_malus(us, qm, depth);
-            ordering_.update_cont_malus(
-                prevPt, prevTo, pos.piece_on(qm.from_sq()), qm.to_sq(), depth);
+            if (!qm.is_drop())
+              ordering_.update_history_malus(us, qm, depth);
+            ordering_.update_cont_malus(prevPt, prevTo, moved_piece(pos, qm),
+                                        qm.to_sq(), depth);
           }
         } else if (move.is_capture()) {
           const Core::PieceType victim =

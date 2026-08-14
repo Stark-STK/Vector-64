@@ -98,6 +98,16 @@ void generate_legal_moves(Position &pos, MoveList &moves);
 // Captures, en passant and promotions only (for quiescence search).
 void generate_legal_captures(Position &pos, MoveList &moves);
 
+#if defined(ENGINE_VARIANTS)
+// Drops that give check, and nothing else. Quiescence needs these because in
+// a drop variant the dominant tactical motif is a checking drop, not a
+// capture sequence -- without them the search walks past forced mates. The
+// set is naturally bounded: only squares on a ray to the enemy king (or a
+// knight/pawn hop from it) can check, so this adds at most a few dozen moves
+// rather than every empty square.
+void generate_drop_checks(const Position &pos, MoveList &moves);
+#endif
+
 } // namespace Core
 
 #endif
