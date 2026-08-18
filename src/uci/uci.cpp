@@ -329,6 +329,10 @@ private:
       emit(V::json_legalmoves(*target));
       return;
     }
+    if (cmd == "children") {
+      emit(V::json_children(*target));
+      return;
+    }
     if (cmd == "status") {
       emit(V::json_status(*target));
       return;
@@ -438,8 +442,8 @@ private:
       return true;
     }
 #if defined(ENGINE_VARIANTS)
-    if (cmd == "getfen" || cmd == "legalmoves" || cmd == "status" ||
-        cmd == "canmate" || cmd == "apply") {
+    if (cmd == "getfen" || cmd == "legalmoves" || cmd == "children" ||
+        cmd == "status" || cmd == "canmate" || cmd == "apply") {
       handle_validator(cmd, tokens);
       return true;
     }

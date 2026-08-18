@@ -75,6 +75,31 @@ BENCH_FENS = [
 ]
 
 
+def mirror_fen(fen: str) -> str:
+    """The same position with the colours swapped, top to bottom.
+
+    Pure string surgery on the six FEN fields -- no chess library, per the
+    house rule that only the engine encodes chess rules. Ranks are reversed
+    and piece letters change case; castling letters swap case; the en-passant
+    square flips rank. Clocks are untouched.
+    """
+    board, stm, castling, ep, halfmove, fullmove = fen.split()
+
+    ranks = board.split("/")[::-1]
+    flipped = "/".join(r.swapcase() for r in ranks)
+
+    stm = "b" if stm == "w" else "w"
+    if castling != "-":
+        # Swapping case also swaps which side owns each right, so the letters
+        # have to be put back into canonical KQkq order.
+        swapped = castling.swapcase()
+        castling = "".join(c for c in "KQkq" if c in swapped) or "-"
+    if ep != "-":
+        ep = ep[0] + str(9 - int(ep[1]))
+
+    return " ".join([flipped, stm, castling, ep, halfmove, fullmove])
+
+
 class STKNet(nn.Module):
     """Normalized-domain model of src/nnue/network.{h,cpp}."""
 
@@ -497,9 +522,7 @@ def stage_verify(args: argparse.Namespace, float_path: Path, net_path: Path) -> 
     # colour-symmetric by construction (the mover's features are identical in
     # the mirrored position), so the two evals must be exactly equal -- this
     # catches any side-to-move sign bug in training or inference.
-    import chess
-
-    mirrored = [chess.Board(fen).mirror().fen() for fen in BENCH_FENS]
+    mirrored = [mirror_fen(fen) for fen in BENCH_FENS]
     option = "EvalFile" if HIDDEN == 1024 else "EvalFileSmall"
     lines = [f"setoption name {option} value {net_path}"]
     for fen, mfen in zip(BENCH_FENS, mirrored, strict=True):

@@ -2,7 +2,7 @@
 """RL self-play loop for the STK-HalfKA net.
 
 One generation:
-  1. datagen.py   : the current best net plays itself; positions get a
+  1. engine datagen : the current best net plays itself; positions get a
                     WDL-blended label ("<fen> | <cp>").
   2. build train  : ACCUMULATE (sample from every generation's self-play so far)
                     and MIX a fraction of the original Lichess evals as an anchor
@@ -183,10 +183,10 @@ def main() -> int:
         # 1) self-play data from the current best net
         t = time.time()
         if not data.exists() or data.stat().st_size == 0:
-            run([py, str(HERE / "datagen.py"), "--engine", args.engine,
+            run([str(Path(args.engine).resolve()), "datagen",
                  "--net", state["best_net"], "--games", str(args.games),
                  "--nodes", str(args.dg_nodes), "--lam", str(args.lam),
-                 "--concurrency", str(args.concurrency), "--seed", str(1000 + gen),
+                 "--threads", str(args.concurrency), "--seed", str(1000 + gen),
                  "--out", str(data)], log)
         t_dg = (time.time() - t) / 60
 

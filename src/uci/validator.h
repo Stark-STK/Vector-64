@@ -29,6 +29,7 @@
 //   getfen        fen, variant, drawRules
 //   legalmoves    count, moves[] as exact UCI strings
 //   apply <uci>   legal, fen, sideToMove, inCheck, terminal, capturedDropType
+//   children      every legal move with the position it leads to, in one reply
 //   status        sideToMove, inCheck, terminal, legalCount, repetitions
 //   canmate <w|b> side, canMate
 //
@@ -128,6 +129,40 @@ inline std::string json_legalmoves(Core::Position &pos) {
     out += '"';
     out += move_to_uci(legal[i]);
     out += '"';
+  }
+  out += "]}";
+  return out;
+}
+
+// One reply describing every legal move and the position it produces. A
+// caller doing a one-ply lookahead would otherwise need an `apply` round trip
+// per move; this collapses that to a single call, which is what makes a tree
+// search over the validator practical.
+inline std::string json_children(Core::Position &pos) {
+  Core::MoveList legal;
+  Core::generate_legal_moves(pos, legal);
+
+  std::string out = "{\"ok\":true,\"count\":";
+  out += std::to_string(legal.size());
+  out += ",\"children\":[";
+  for (int i = 0; i < legal.size(); ++i) {
+    if (i)
+      out += ',';
+    const Core::Move m = legal[i];
+    Core::UndoInfo undo{};
+    pos.make_move(m, undo);
+    out += "{\"move\":\"";
+    out += move_to_uci(m);
+    out += "\",\"fen\":\"";
+    out += pos.toFEN();
+    out += "\",\"sideToMove\":\"";
+    out += (pos.side_to_move() == Core::WHITE ? "w" : "b");
+    out += "\",\"inCheck\":";
+    out += (pos.in_check() ? "true" : "false");
+    out += ",\"terminal\":\"";
+    out += terminal_state(pos);
+    out += "\"}";
+    pos.unmake_move(m, undo);
   }
   out += "]}";
   return out;

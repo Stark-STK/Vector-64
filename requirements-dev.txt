@@ -3,4 +3,7 @@
 ruff>=0.15,<0.16
 mypy>=1.19,<2
 pytest>=8,<9
-chess>=1.10
+# No chess library on purpose: the engine is the only thing in this repo that
+# encodes chess rules. Tools that need legality, move application or terminal
+# detection drive ChessEngine-validator (see tools/nnue/match.py, class
+# Arbiter); FEN decoding for feature work lives in tools/nnue/halfka_features.py.

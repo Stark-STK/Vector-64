@@ -118,6 +118,14 @@ class Arbiter:
     def legal_moves(self, moves: list[str]) -> list[str]:
         return self._query(f"legalmoves {self._clause(moves)}")["moves"]
 
+    def children(self, moves: list[str]) -> list[dict]:
+        """Every legal move plus the position it reaches, in one round trip.
+
+        Each entry has move, fen, sideToMove, inCheck and terminal -- a whole
+        ply of lookahead without a query per move.
+        """
+        return self._query(f"children {self._clause(moves)}")["children"]
+
     def fen(self, moves: list[str]) -> str:
         return self._query(f"getfen {self._clause(moves)}")["fen"]
 

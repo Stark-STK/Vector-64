@@ -12,7 +12,12 @@ It writes checkpoints compatible with tools/nnue/export_vector64.py.
 Dependencies:
   - torch
   - numpy
-  - python-chess
+
+Chess rules come from the engine's validator binary (ChessEngine-validator),
+not a chess library: house rule is that only the engine encodes chess rules.
+Self-play uses one `children` call per ply, which returns every legal move
+together with the position it leads to and that position's terminal state --
+so a whole ply of lookahead costs a single round trip.
 """
 
 from __future__ import annotations
@@ -24,10 +29,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import halfka_features as hkf
 import numpy as np
 import torch
 import torch.nn.functional as F
+from match import Arbiter
 from train_vector64 import Vector64NNUE
+
+START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+KING_TYPE = 6
 
 PIECE_BUCKET = {
     1: 0,  # pawn
@@ -42,6 +52,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Pure RL self-play trainer for Vector-64 NNUE.")
     p.add_argument("--out-checkpoint", required=True, help="Final checkpoint path (.pt)")
     p.add_argument("--resume", default=None, help="Optional checkpoint to resume from")
+    p.add_argument("--arbiter", default="build/bin/ChessEngine-validator",
+                   help="validator binary supplying the chess rules")
 
     p.add_argument("--games", type=int, default=2000, help="Number of self-play games")
     p.add_argument("--max-game-plies", type=int, default=240, help="Truncate games after this many plies")
@@ -101,17 +113,32 @@ def linear_decay(start: float, end: float, step: int, horizon: int) -> float:
     return start + (end - start) * t
 
 
-def outcome_white_score(outcome) -> float:
-    if outcome is None or outcome.winner is None:
-        return 0.0
-    return 1.0 if bool(outcome.winner) else -1.0
+def terminal_white_score(terminal: str, side_to_move: str) -> float:
+    """White's result for a finished position: +1 white win, -1 black win.
+
+    Only checkmate is decisive; every other terminal state is a draw, and an
+    unfinished position scores 0 too (the caller bootstraps those separately).
+    The mated side is the one to move.
+    """
+    if terminal == "checkmate":
+        return -1.0 if side_to_move == "w" else 1.0
+    return 0.0
 
 
-def encode_halfkp(board, max_features: int):
-    import chess
+def encode_halfkp(fen: str, max_features: int):
+    """HalfKP indices for one position, read straight off its FEN.
 
-    white_king_sq = board.king(chess.WHITE)
-    black_king_sq = board.king(chess.BLACK)
+    Board decoding is shared with halfka_features (which mirrors
+    src/nnue/halfka.h), so there is one FEN parser in the tree rather than a
+    second one hidden behind a library. Square, colour and piece-type
+    conventions match Core: a1=0, WHITE=0, PAWN=1..KING=6.
+    """
+    pieces, stm = hkf.parse_fen_pieces(fen)
+
+    white_king_sq = next(
+        (sq for sq, c, t in pieces if t == KING_TYPE and c == hkf.WHITE), None)
+    black_king_sq = next(
+        (sq for sq, c, t in pieces if t == KING_TYPE and c == hkf.BLACK), None)
     if white_king_sq is None or black_king_sq is None:
         raise ValueError("Invalid board without both kings.")
 
@@ -119,13 +146,13 @@ def encode_halfkp(board, max_features: int):
     black_idx = np.full((max_features,), -1, dtype=np.int32)
 
     k = 0
-    for sq, piece in board.piece_map().items():
-        if piece.piece_type == chess.KING:
+    for sq, color, pt in pieces:
+        if pt == KING_TYPE:
             continue
-        bucket_base = PIECE_BUCKET.get(piece.piece_type)
+        bucket_base = PIECE_BUCKET.get(pt)
         if bucket_base is None:
             continue
-        bucket = bucket_base + (5 if piece.color == chess.BLACK else 0)
+        bucket = bucket_base + (5 if color == hkf.BLACK else 0)
         if k >= max_features:
             raise ValueError(
                 f"max_features={max_features} is too small for this position; increase --max-features."
@@ -135,7 +162,6 @@ def encode_halfkp(board, max_features: int):
         black_idx[k] = (((black_king_sq * 10 + bucket) * 64 + sq) * 2) + 1
         k += 1
 
-    stm = 0 if board.turn else 1
     return white_idx, black_idx, stm
 
 
@@ -158,7 +184,9 @@ def model_infer_cp(
 
 def choose_selfplay_move(
     model: torch.nn.Module,
-    board,
+    arbiter: Arbiter,
+    moves: list[str],
+    stm_is_white: bool,
     *,
     epsilon: float,
     max_features: int,
@@ -167,36 +195,32 @@ def choose_selfplay_move(
     amp_enabled: bool,
     inference_batch: int,
 ):
-    import chess
-
-    legal_moves = list(board.legal_moves)
-    if not legal_moves:
+    # One round trip gives every legal move, the position it reaches and that
+    # position's terminal state -- the whole ply of lookahead.
+    kids = arbiter.children(moves)
+    if not kids:
         return None
 
-    if len(legal_moves) == 1 or random.random() < epsilon:
-        return random.choice(legal_moves)
+    if len(kids) == 1 or random.random() < epsilon:
+        return random.choice(kids)
 
-    stm_is_white = board.turn == chess.WHITE
-    move_scores = np.zeros((len(legal_moves),), dtype=np.float32)
+    move_scores = np.zeros((len(kids),), dtype=np.float32)
 
     pending_idx = []
     pending_w = []
     pending_b = []
     pending_stm = []
 
-    for i, mv in enumerate(legal_moves):
-        board.push(mv)
-        outcome = board.outcome(claim_draw=True)
-        if outcome is not None:
-            white_score = outcome_white_score(outcome)
+    for i, kid in enumerate(kids):
+        if kid["terminal"] != "none":
+            white_score = terminal_white_score(kid["terminal"], kid["sideToMove"])
             move_scores[i] = white_score * result_scale if stm_is_white else -white_score * result_scale
         else:
-            w, b, s = encode_halfkp(board, max_features)
+            w, b, s = encode_halfkp(kid["fen"], max_features)
             pending_idx.append(i)
             pending_w.append(w)
             pending_b.append(b)
             pending_stm.append(s)
-        board.pop()
 
     if pending_idx:
         w_arr = np.stack(pending_w, axis=0)
@@ -225,7 +249,7 @@ def choose_selfplay_move(
     best = float(np.max(move_scores))
     best_indices = np.flatnonzero(move_scores >= (best - 1e-6))
     chosen = int(np.random.choice(best_indices))
-    return legal_moves[chosen]
+    return kids[chosen]
 
 
 @dataclass
@@ -241,6 +265,7 @@ class GeneratedGame:
 
 def generate_selfplay_game(
     model: torch.nn.Module,
+    arbiter: Arbiter,
     *,
     epsilon: float,
     max_game_plies: int,
@@ -252,26 +277,31 @@ def generate_selfplay_game(
     inference_batch: int,
     bootstrap_truncated: bool,
 ) -> GeneratedGame:
-    import chess
-
-    board = chess.Board()
     states_w = []
     states_b = []
     states_stm = []
 
+    # The chosen child carries the resulting position and its terminal state,
+    # so the loop needs no extra query to know where it stands.
+    moves: list[str] = []
+    fen = START_FEN
+    terminal = "none"
+    side_to_move = "w"
+
     for _ in range(max_game_plies):
-        outcome = board.outcome(claim_draw=True)
-        if outcome is not None:
+        if terminal != "none":
             break
 
-        w, b, s = encode_halfkp(board, max_features)
+        w, b, s = encode_halfkp(fen, max_features)
         states_w.append(w)
         states_b.append(b)
         states_stm.append(s)
 
-        mv = choose_selfplay_move(
+        kid = choose_selfplay_move(
             model,
-            board,
+            arbiter,
+            moves,
+            side_to_move == "w",
             epsilon=epsilon,
             max_features=max_features,
             result_scale=result_scale,
@@ -279,16 +309,18 @@ def generate_selfplay_game(
             amp_enabled=amp_enabled,
             inference_batch=inference_batch,
         )
-        if mv is None:
+        if kid is None:
             break
-        board.push(mv)
+        moves.append(kid["move"])
+        fen = kid["fen"]
+        terminal = kid["terminal"]
+        side_to_move = kid["sideToMove"]
 
-    outcome = board.outcome(claim_draw=True)
-    terminated = outcome is not None
-    white_score = outcome_white_score(outcome)
+    terminated = terminal != "none"
+    white_score = terminal_white_score(terminal, side_to_move)
 
     if (not terminated) and bootstrap_truncated and states_stm:
-        w, b, s = encode_halfkp(board, max_features)
+        w, b, s = encode_halfkp(fen, max_features)
         cp = float(
             model_infer_cp(
                 model,
@@ -484,12 +516,11 @@ def main() -> int:
     if args.games <= 0:
         raise ValueError("--games must be > 0")
 
-    try:
-        import chess  # noqa: F401
-    except ImportError as exc:
+    if not Path(args.arbiter).exists():
         raise RuntimeError(
-            "python-chess is required for RL self-play. Install with: pip install python-chess"
-        ) from exc
+            f"validator binary not found: {args.arbiter}\n"
+            "Build it: cmake --build <builddir> --target ChessEngine-validator"
+        )
 
     set_seed(args.seed)
     device = choose_device(args.device)
@@ -527,6 +558,10 @@ def main() -> int:
     running_plies = []
     started = time.time()
 
+    # One long-lived referee for the whole run; it holds no game state, so the
+    # same process serves every game.
+    arbiter = Arbiter(args.arbiter)
+
     for game in range(1, args.games + 1):
         epsilon = linear_decay(
             args.epsilon_start,
@@ -537,6 +572,7 @@ def main() -> int:
 
         generated = generate_selfplay_game(
             model,
+            arbiter,
             epsilon=epsilon,
             max_game_plies=args.max_game_plies,
             gamma=args.gamma,
@@ -629,6 +665,7 @@ def main() -> int:
     meta_path = out_path.with_suffix(out_path.suffix + ".meta.json")
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     print(f"Wrote meta: {meta_path}")
+    arbiter.quit()
     return 0
 
 
