@@ -472,15 +472,31 @@ deterministic only at `Threads 1`; lazy SMP is non-deterministic by design.
 The board mechanics are correct and the engine plays legal crazyhouse and
 bughouse. It does not yet play them *well*. In rough priority order:
 
-1. ~~**Drop-checks in quiescence.**~~ **Done.** `generate_drop_checks`
-   (`src/cores/movegen.cpp`) emits exactly the legal drops that give check --
-   only squares on a ray to the enemy king, or a knight/pawn hop from it, so
-   the set is naturally bounded to a few dozen rather than every empty square.
-   Quiescence generates them for the first `DROP_CHECK_QDEPTH` (2) plies;
-   deeper would explode, since every check hands the opponent a full set of
-   evasions. The generator is verified against brute force at every ply of the
-   300 randomised games. **The depth limit and the drop ordering score are
-   untuned starting points, not SPRT results.**
+1. ~~**Drop-checks in quiescence.**~~ **Built, measured, and turned off.**
+   `generate_drop_checks` (`src/cores/movegen.cpp`) emits exactly the legal
+   drops that give check, verified against brute force at every ply of the 300
+   randomised games. It is correct -- and it loses Elo.
+
+   Crazyhouse SPRT at 25k nodes, H0 elo<=0 / H1 elo>=5:
+
+   | Comparison | Result | Games | Verdict |
+   |---|---|---|---|
+   | qdepth 2 vs 0 (off) | -20.8 Elo +/- 12.4 | 3014 | H0 accepted |
+   | qdepth 4 vs 2 | -146.6 Elo +/- 36.0 | 429 | H0 accepted |
+
+   So `ENGINE_DROP_CHECK_QDEPTH` now defaults to **0**. The loss is monotonic
+   in depth, which points at node cost rather than bad tactics: every checking
+   drop hands the opponent a full set of evasions, the qsearch tree grows
+   fast, and at a fixed node budget the lost depth outweighs the tactics
+   gained. This was predicted to be "the single largest strength gap" -- the
+   prediction was wrong, and the measurement is what settles it.
+
+   Two honest caveats. The test is fixed-node, which penalises anything that
+   costs nodes per move; fixed-time might read differently, though the -147 at
+   qdepth 4 makes a rescue unlikely. And drop variants currently run the
+   classical evaluation, which may undervalue the attacking positions these
+   drops reach. Worth re-running after item 4 lands. The code stays, one
+   constant away from being re-enabled.
 2. **Drop-aware SEE.** Partly done. The *correctness* half is fixed: `see()`
    is never called on a drop (its `from_sq` holds a piece type, so it would
    read a nonsense attacker), drops are excluded from the `[from][to]` history

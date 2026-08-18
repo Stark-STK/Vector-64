@@ -31,7 +31,11 @@ param(
   [int]$Nodes = 25000,
   [int]$Games = 6000,
   [int]$Conc  = 2,
-  [string]$Variant = "crazyhouse"
+  [string]$Variant = "crazyhouse",
+  # Tests A and B share the qdepth=2 build. Running both at once would have
+  # two cmake invocations writing the same directory, so pre-build the three
+  # trees once and pass -SkipBuild to both runs.
+  [switch]$SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,9 +55,24 @@ $logdir  = Join-Path $root "sprt\logs"
 New-Item -ItemType Directory -Force -Path $logdir | Out-Null
 $log = Join-Path $logdir ("dropchecks_{0}_{1}v{2}_{3}n.log" -f $Variant, $newDepth, $baseDepth, $Nodes)
 
+# Inherit the generator the main build tree already uses. Without this a fresh
+# directory falls back to the platform default, which on a machine that also
+# has Visual Studio installed silently switches toolchain mid-comparison.
+function Get-Generator {
+  $cache = Join-Path $root "build\CMakeCache.txt"
+  if (Test-Path $cache) {
+    $line = Select-String -Path $cache -Pattern '^CMAKE_GENERATOR:INTERNAL=(.+)$' |
+            Select-Object -First 1
+    if ($line) { return $line.Matches[0].Groups[1].Value }
+  }
+  return $null
+}
+
 function Build-Side([string]$dir, [int]$depth) {
   Write-Host ("  building qdepth={0} -> {1}" -f $depth, (Split-Path $dir -Leaf))
-  cmake -S $root -B $dir -DCMAKE_BUILD_TYPE=Release -DENGINE_VIZ=OFF `
+  $gen = Get-Generator
+  $genArgs = if ($gen) { @("-G", $gen) } else { @() }
+  cmake -S $root -B $dir @genArgs -DCMAKE_BUILD_TYPE=Release -DENGINE_VIZ=OFF `
         -DENGINE_DROP_CHECK_QDEPTH=$depth | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "cmake configure failed for qdepth=$depth" }
   cmake --build $dir --target ChessEngine-variants ChessEngine-validator -j | Out-Null
@@ -64,8 +83,12 @@ Write-Host ""
 Write-Host "===================================================================="
 Write-Host "  STK-Vector-64  --  $label"
 Write-Host "===================================================================="
-Build-Side $newDir  $newDepth
-Build-Side $baseDir $baseDepth
+if ($SkipBuild) {
+  Write-Host "  -SkipBuild: using the existing build trees"
+} else {
+  Build-Side $newDir  $newDepth
+  Build-Side $baseDir $baseDepth
+}
 
 $newExe  = Join-Path $newDir  "bin\ChessEngine-variants.exe"
 $baseExe = Join-Path $baseDir "bin\ChessEngine-variants.exe"

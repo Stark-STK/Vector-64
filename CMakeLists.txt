@@ -138,11 +138,19 @@ set_target_properties(ChessEngine PROPERTIES
 # construction, not by measurement.
 # ---------------------------------------------------------------------------
 option(ENGINE_VARIANTS "Build ChessEngine-variants (crazyhouse + bughouse)" ON)
-# Plies of quiescence that generate checking drops; 0 disables them. Kept a
-# compile-time knob (not a UCI option) so an SPRT compares two binaries built
-# from the same source rather than one binary in two modes. Configure separate
-# build directories to produce the two sides -- see tools/sprt_dropchecks.ps1.
-set(ENGINE_DROP_CHECK_QDEPTH "2" CACHE STRING
+# Plies of quiescence that generate checking drops. Kept a compile-time knob
+# (not a UCI option) so an SPRT compares two binaries built from the same
+# source rather than one binary in two modes -- see tools/sprt_dropchecks.ps1.
+#
+# Default 0 (off), and that is a measured result, not a guess. Crazyhouse SPRT
+# at 25k nodes, H0 elo<=0 / H1 elo>=5:
+#   qdepth 2 vs 0: -20.8 Elo +/- 12.4 over 3014 games, H0 accepted
+#   qdepth 4 vs 2: -146.6 Elo +/- 36.0 over 429 games, H0 accepted
+# Monotonic in depth, which points at node cost rather than bad tactics: every
+# checking drop hands the opponent a full set of evasions, so the qsearch tree
+# grows fast and a fixed node budget buys less real depth than the extra
+# tactics are worth. Worth revisiting once a variant-tuned evaluation exists.
+set(ENGINE_DROP_CHECK_QDEPTH "0" CACHE STRING
         "Quiescence plies that generate checking drops (0 = off)")
 if(ENGINE_VARIANTS)
         add_library(chess_core_variants STATIC ${CORE_SOURCES} ${CORE_HEADERS})

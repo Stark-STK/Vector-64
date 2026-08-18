@@ -19,12 +19,11 @@
 #endif
 
 #if defined(ENGINE_VARIANTS)
-// Plies of quiescence that generate checking drops; 0 disables them. A
-// compile-time knob so an SPRT compares two binaries rather than one binary
-// in two modes -- override with -DENGINE_DROP_CHECK_QDEPTH=N (see
-// tools/sprt_dropchecks.ps1). 2 is a starting point, not a measured optimum.
+// Plies of quiescence that generate checking drops; 0 disables them. Override
+// with -DENGINE_DROP_CHECK_QDEPTH=N (see tools/sprt_dropchecks.ps1 and the
+// CMake cache entry, which records the SPRT that set this default to 0).
 #ifndef ENGINE_DROP_CHECK_QDEPTH
-#define ENGINE_DROP_CHECK_QDEPTH 2
+#define ENGINE_DROP_CHECK_QDEPTH 0
 #endif
 #endif
 
