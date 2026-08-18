@@ -18,6 +18,16 @@
 #define PROF_ADD(cyc, cnt) (void)0
 #endif
 
+#if defined(ENGINE_VARIANTS)
+// Plies of quiescence that generate checking drops; 0 disables them. A
+// compile-time knob so an SPRT compares two binaries rather than one binary
+// in two modes -- override with -DENGINE_DROP_CHECK_QDEPTH=N (see
+// tools/sprt_dropchecks.ps1). 2 is a starting point, not a measured optimum.
+#ifndef ENGINE_DROP_CHECK_QDEPTH
+#define ENGINE_DROP_CHECK_QDEPTH 2
+#endif
+#endif
+
 namespace Search {
 namespace {
 
@@ -498,8 +508,7 @@ HOT_FN int EngineSearch::quiescence(Core::Position &pos, int alpha, int beta,
     // opponent a full set of evasions, so generating them all the way down
     // explodes the tree. The depth limit is a conservative starting point and
     // has not been SPRT-tuned.
-    constexpr int DROP_CHECK_QDEPTH = 2;
-    if (qDepth < DROP_CHECK_QDEPTH && pos.has_drops() &&
+    if (qDepth < ENGINE_DROP_CHECK_QDEPTH && pos.has_drops() &&
         pos.has_any_in_hand(pos.side_to_move())) {
       Core::generate_drop_checks(pos, moves);
     }

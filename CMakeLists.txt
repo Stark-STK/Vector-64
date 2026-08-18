@@ -138,10 +138,17 @@ set_target_properties(ChessEngine PROPERTIES
 # construction, not by measurement.
 # ---------------------------------------------------------------------------
 option(ENGINE_VARIANTS "Build ChessEngine-variants (crazyhouse + bughouse)" ON)
+# Plies of quiescence that generate checking drops; 0 disables them. Kept a
+# compile-time knob (not a UCI option) so an SPRT compares two binaries built
+# from the same source rather than one binary in two modes. Configure separate
+# build directories to produce the two sides -- see tools/sprt_dropchecks.ps1.
+set(ENGINE_DROP_CHECK_QDEPTH "2" CACHE STRING
+        "Quiescence plies that generate checking drops (0 = off)")
 if(ENGINE_VARIANTS)
         add_library(chess_core_variants STATIC ${CORE_SOURCES} ${CORE_HEADERS})
         set_source_files_properties(src/syzygy/tbprobe.c PROPERTIES LANGUAGE CXX)
-        target_compile_definitions(chess_core_variants PUBLIC ENGINE_VARIANTS)
+        target_compile_definitions(chess_core_variants PUBLIC ENGINE_VARIANTS
+                ENGINE_DROP_CHECK_QDEPTH=${ENGINE_DROP_CHECK_QDEPTH})
         target_include_directories(chess_core_variants PUBLIC src)
         target_include_directories(chess_core_variants PRIVATE src/syzygy)
 
