@@ -19,6 +19,7 @@ Production-grade C++20 chess engine focused on fast legal move generation, UCI s
 - NNUE live visualizer (Vector Scope): `docs/visualizer.md`
 - Production target profile: `docs/vector64-spec.md`
 - Variant support (crazyhouse + bughouse): `docs/variants.md`
+  (`ChessEngine-all` = standard chess with NNUE + both drop variants in one binary)
 - Host/game-server integration surface: `docs/engine-integration-response.md`
 
 ## Build

@@ -210,8 +210,15 @@ public:
     position_.setFromFEN(STANDARD_STARTPOS_FEN);
     search_.set_hash_mb(static_cast<size_t>(hashMb_));
     search_.set_threads(threads_);
-    if (embeddedNet && embeddedNetSize && !validatorOnly_)
-      search_.load_nnue_buffer(embeddedNet, embeddedNetSize);
+    if (embeddedNet && embeddedNetSize && !validatorOnly_) {
+      if (search_.load_nnue_buffer(embeddedNet, embeddedNetSize)) {
+#if defined(ENGINE_VARIANTS)
+        // Remembered so a later variant switch can say it is dropping to the
+        // classical evaluation rather than silently changing strength.
+        nnueLoaded_ = true;
+#endif
+      }
+    }
   }
 
   ~EngineUci() { stop_and_join(true); }
@@ -649,17 +656,15 @@ private:
              "'");
         return;
       }
-      // Mirror of the EvalFile guard: a net loaded for standard chess cannot
-      // evaluate reserves and its accumulator has no drop update path, so
-      // refuse the switch instead of playing on a wrong evaluation.
-      if (v != Core::VARIANT_STANDARD && nnueLoaded_) {
-        emit("info string setoption UCI_Variant: refusing to switch to " +
-             value +
-             " with an NNUE net loaded; restart and set UCI_Variant "
-             "before EvalFile");
-        return;
-      }
       stop_and_join(true);
+      // A net cannot evaluate reserves and its accumulator has no drop update
+      // path, so drop variants fall back to the classical evaluation. The net
+      // stays loaded and returns when the variant goes back to standard, so
+      // one process can serve all three.
+      search_.set_nnue_enabled(v == Core::VARIANT_STANDARD);
+      if (v != Core::VARIANT_STANDARD && nnueLoaded_)
+        emit("info string " + value +
+             ": using the classical evaluation (no NNUE net covers reserves)");
       variant_ = v;
       std::lock_guard<std::mutex> lock(positionMu_);
       apply_variant(position_);
@@ -676,17 +681,6 @@ private:
     }
 
 #if defined(ENGINE_VARIANTS)
-    // The NNUE feature set has no reserve features and the accumulator has no
-    // drop update path, so a net loaded in a drop variant would evaluate
-    // reserves as invisible and desynchronise on the first drop. Refuse it
-    // rather than report a silently wrong score; the classical evaluation
-    // stays in use. See docs/variants.md section 12.
-    if ((name == "evalfile" || name == "evalfilesmall") &&
-        variant_ != Core::VARIANT_STANDARD) {
-      emit("info string " + name +
-           " ignored: no NNUE net is valid for a drop variant yet");
-      return;
-    }
 #endif
 
     if (name == "evalfile") {

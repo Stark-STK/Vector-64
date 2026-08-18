@@ -3,8 +3,15 @@
 Status: Crazyhouse and bughouse board mechanics and the host integration
 surface implemented; search and evaluation tuning outstanding (section 13).
 
-Shipped as a separate binary, `ChessEngine-variants`, selected at runtime with
-`setoption name UCI_Variant value crazyhouse|bughouse`.
+Selected at runtime with `setoption name UCI_Variant value crazyhouse|bughouse`.
+
+Two binaries carry it: **`ChessEngine-all`** (standard chess with the embedded
+NNUE net *plus* both drop variants -- the one to ship) and
+`ChessEngine-variants` (the same without a net, used for SPRT so both sides of
+a test run the classical evaluation). In `ChessEngine-all` a drop variant
+automatically falls back to the classical evaluation and returns to NNUE when
+`UCI_Variant` goes back to `chess`; its standard bench signature is identical
+to `ChessEngine-nnue`.
 
 Related: `docs/architecture.md` (current implementation), `docs/vector64-spec.md`
 (production profile).
@@ -487,10 +494,11 @@ bughouse. It does not yet play them *well*. In rough priority order:
    chess assumptions that drop variants violate. Each is an SPRT question.
 4. **Evaluation.** `PieceValue` needs a variant table plus terms for material
    in hand and for king safety scaled by the *opponent's* reserve.
-5. **NNUE.** The variant binary currently has no net trained for drops. A net
-   without the hand-feature block would evaluate reserves as invisible; the
-   accumulator update also has no drop path yet, so a net must not be loaded
-   in variant mode until both land (section 8.2).
+5. **NNUE.** No net is trained for drops. A net without the hand-feature block
+   would evaluate reserves as invisible, and the accumulator update has no
+   drop path, so drop variants run the classical evaluation
+   (`set_nnue_enabled(false)`) even in a binary that embeds a net. Out of
+   scope for now by decision, not oversight (section 8.2).
 6. **Bughouse partner layer.** Protocol, incoming-material model, sitting
    (section 10). Until this exists, bughouse mode is crazyhouse with the repetition
    and fifty-move draws switched off.

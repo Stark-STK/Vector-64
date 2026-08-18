@@ -366,8 +366,19 @@ uint64_t EngineSearch::total_tb_hits() const {
 }
 
 int EngineSearch::evaluate(const Core::Position &pos) {
+#if defined(ENGINE_VARIANTS)
+  if (!nnueEnabled_) {
+    // Same classical material+psqt the evaluator falls back to with no net.
+    const int sign = pos.side_to_move() == Core::WHITE ? 1 : -1;
+    return sign * (pos.material_wb() + pos.psqt_wb());
+  }
+#endif
   return eval_->evaluate(pos);
 }
+
+#if defined(ENGINE_VARIANTS)
+void EngineSearch::set_nnue_enabled(bool v) { nnueEnabled_ = v; }
+#endif
 
 // Dual-net gate: when the O(1) material+psqt estimate already calls the
 // position clearly decided (|estimate| > smallNetThreshold_), the cheap
@@ -1139,7 +1150,11 @@ Result EngineSearch::search_internal(Core::Position &root, const Limits &limits,
   }
 
   // Build the root accumulator once; the search maintains it incrementally.
+#if defined(ENGINE_VARIANTS)
+  nnueActive_ = nnueEnabled_ && eval_->nnue_active();
+#else
   nnueActive_ = eval_->nnue_active();
+#endif
   smallActive_ = nnueActive_ && eval_->small_active();
   if (nnueActive_)
     eval_->big().refresh(root, accStack_[0]);

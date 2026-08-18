@@ -67,6 +67,13 @@ public:
   void set_hash_mb(size_t hashMb);
   void set_threads(int threads);
   void set_small_net_threshold(int cp);
+#if defined(ENGINE_VARIANTS)
+  // Suppress a loaded net without unloading it. The NNUE feature set has no
+  // reserve features and its accumulator has no drop update path, so a drop
+  // variant must fall back to the classical evaluation -- but the same
+  // process may switch back to standard chess and want the net again.
+  void set_nnue_enabled(bool v);
+#endif
   void set_lazy_eval_margin(int cp);
   // Keep move-ordering history warm across the searches of one game instead of
   // zeroing ~857 KB of tables every call. ON by default: SPRT measured
@@ -176,6 +183,9 @@ private:
   std::unique_ptr<NNUE::SmallRefreshTable> smallRefreshTable_;
   bool nnueActive_ = false;
   bool smallActive_ = false;
+#if defined(ENGINE_VARIANTS)
+  bool nnueEnabled_ = true;
+#endif
   // Dual-net gate: |material+psqt| above this (cp) takes the small-net eval.
   int smallNetThreshold_ = 950;
   // Lazy eval: |PSQT side-output| above this (cp) skips the big net's dense

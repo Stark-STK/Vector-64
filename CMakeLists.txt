@@ -179,6 +179,7 @@ if(ENGINE_VARIANTS)
         message(STATUS "Validator binary: ChessEngine-validator (no search, no net)")
 endif()
 
+
 # ---------------------------------------------------------------------------
 # NNUE binary: ChessEngine-nnue, with the default net baked into the executable
 # (Stockfish-style, via GNU-as .incbin). Built only when the net exists and the
@@ -226,6 +227,29 @@ if(EXISTS "${EMBED_NNUE}" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|MSVC")
         message(STATUS "NNUE binary: ChessEngine-nnue embeds ${EMBED_NNUE}")
 else()
         message(STATUS "NNUE binary: skipped (net '${EMBED_NNUE}' missing or unsupported toolchain)")
+endif()
+
+# ---------------------------------------------------------------------------
+# Combined binary: ChessEngine-all -- standard chess with the embedded NNUE
+# net, plus crazyhouse and bughouse, in one executable. Standard play is
+# full-strength NNUE; a drop variant automatically falls back to the classical
+# evaluation, because no net covers reserves, and picks the net back up when
+# UCI_Variant returns to chess. Defined after the NNUE section so the embed
+# sources it builds are already configured.
+# ---------------------------------------------------------------------------
+if(ENGINE_VARIANTS AND TARGET ChessEngine-nnue)
+        add_executable(ChessEngine-all
+                app/main.cpp
+                tests/cpp/perfts.cpp
+                tests/cpp/perfts.h
+                ${_nnue_embed}
+        )
+        target_compile_definitions(ChessEngine-all PRIVATE STK_EMBED_NNUE)
+        target_include_directories(ChessEngine-all PRIVATE tests/cpp)
+        target_link_libraries(ChessEngine-all chess_core_variants)
+        set_target_properties(ChessEngine-all PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+        message(STATUS "Combined binary: ChessEngine-all (chess+NNUE, crazyhouse, bughouse)")
 endif()
 
 # ---------------------------------------------------------------------------

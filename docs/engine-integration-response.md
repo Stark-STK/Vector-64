@@ -24,9 +24,24 @@ Three binaries matter to the server:
 
 | Binary | Tier | Notes |
 |---|---|---|
+| `ChessEngine-all` | Search, all variants | **One binary for everything.** Standard chess at full NNUE strength, plus crazyhouse and bughouse. Recommended for the search tier. |
 | `ChessEngine-validator` | Validator | No search, no net, 1 MB table, one thread. `go`/`bench` refused. |
-| `ChessEngine-variants` | Search | Full search. `--validator` starts it in validator mode instead. |
+| `ChessEngine-variants` | Search, no net | Same as `-all` without the embedded net (classical everywhere). Mainly for SPRT. |
 | `ChessEngine` / `ChessEngine-nnue` | Standard chess only | Tournament binaries. No variant support by design; do not use them for crazyhouse or bughouse. |
+
+`ChessEngine-all` switches evaluation automatically: standard chess uses the
+embedded NNUE net, and a drop variant falls back to the classical evaluation
+because no net covers reserves. The net is not unloaded -- setting
+`UCI_Variant` back to `chess` restores full NNUE strength in the same process.
+The switch is announced:
+
+```
+> setoption name UCI_Variant value crazyhouse
+info string crazyhouse: using the classical evaluation (no NNUE net covers reserves)
+```
+
+Its standard-chess bench signature is identical to `ChessEngine-nnue`
+(2704705), so carrying the variant code costs standard play nothing.
 
 The variant code is compile-time gated, so the tournament binaries contain
 none of it. That is deliberate and load-bearing: it is why variant work cannot
